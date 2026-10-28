@@ -1,0 +1,6 @@
+{
+  "name": "PIXORA — Image Splitter, Compressor & Crop Utility",
+  "description": "Prepare images for social media with on-device privacy. Split grid tiles, compress to exact KB/MB limits, resize, crop, and export ZIP archives.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

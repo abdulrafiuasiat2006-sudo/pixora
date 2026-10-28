@@ -1,0 +1,27 @@
+{
+  "id": "/",
+  "name": "PIXORA Image Utility Platform",
+  "short_name": "PIXORA",
+  "description": "Your images. Every format. One place. Image splitter, compressor with target KB/MB controls, resizer, cropper, and verified social presets.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F7F5F0",
+  "theme_color": "#F7F5F0",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["utilities", "photo", "productivity"]
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "id": "usr_default_demo",
+    "name": "Pixora Creator",
+    "email": "creator@pixora.app",
+    "passwordHash": "60bdb35ca7874ecd59ee80e32e6dfecd05a6c414d93461a619e2e4fc330d0e84b2e157b5697a19f7177c9747f67f56292d66fe155f2775ebfc92969edbd1e12d",
+    "salt": "9e0e235d070aac49bd734015e7b43b0f",
+    "createdAt": 1792831210439
+  },
+  {
+    "id": "usr_85dba1b354afedd9",
+    "name": "Jane Designer",
+    "email": "jane@designer.studio",
+    "passwordHash": "cf234da5a4565b4387bd6efc3ff3c947c374a35cd6a088ce7191f1453d9701bfbe2e9b836ab5b9a19eb867593d7b7feed5fdde2b8f33ef7481d32b2f0da6663e",
+    "salt": "41ec197feb438c3c3373c3559202fcde",
+    "createdAt": 1792831221420
+  }
+]
