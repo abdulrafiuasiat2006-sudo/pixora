@@ -109,32 +109,12 @@ export const Header: React.FC<HeaderProps> = ({ currentTab, onNavigate }) => {
         <div className="max-w-7xl mx-auto h-16 flex items-center justify-between gap-2 sm:gap-6">
           {/* ZONE 1: BRAND WORDMARK */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {isAuthenticated && currentTab !== 'dashboard' ? (
-              <button
-                type="button"
-                onClick={() => handleNavClick('dashboard')}
-                className="flex items-center gap-1 px-2 py-1.5 min-h-[38px] text-xs font-semibold text-[#171717] bg-white border border-[#171717]/15 rounded-lg hover:bg-[#171717]/5 transition shadow-2xs cursor-pointer active:scale-95"
-                aria-label="Back to Studio Hub"
-              >
-                <span className="text-[#FF6B35] font-bold text-sm">‹</span>
-                <span className="hidden xs:inline">Studio</span>
-              </button>
-            ) : null}
-
             <button
               type="button"
               onClick={() => handleNavClick(isAuthenticated ? 'dashboard' : 'welcome')}
-              className="flex items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6B35] rounded-md cursor-pointer py-1"
+              className="flex items-center text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FF6B35] rounded-md cursor-pointer py-1"
               aria-label={`${BRANDING.name} Home`}
             >
-              <div className="w-8 h-8 rounded-lg bg-[#171717] flex items-center justify-center p-1.5 shadow-xs shrink-0">
-                <svg viewBox="0 0 100 100" className="w-full h-full" fill="none">
-                  <rect x="10" y="10" width="36" height="36" rx="6" fill="#FF6B35" />
-                  <rect x="54" y="10" width="36" height="36" rx="6" fill="#F7F5F0" />
-                  <rect x="10" y="54" width="36" height="36" rx="6" fill="#F7F5F0" />
-                  <rect x="54" y="54" width="36" height="36" rx="6" fill="#F7F5F0" fillOpacity="0.4" />
-                </svg>
-              </div>
               <span className="text-base sm:text-lg font-bold tracking-tight text-[#171717]">
                 {BRANDING.name}
               </span>
