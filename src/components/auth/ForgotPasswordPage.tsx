@@ -9,6 +9,7 @@ import {
   ArrowLeft,
   Send,
   ShieldCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 interface ForgotPasswordPageProps {
@@ -17,10 +18,19 @@ interface ForgotPasswordPageProps {
 
 export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNavigate }) => {
   const { resetPassword } = useAuth();
-  const [email, setEmail] = useState('');
-  const [isSubmitted, setIsSubmitted] = useState(false);
+
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem('pixora_last_login_email') || 'abdulrafiuasiat2006@gmail.com';
+    } catch {
+      return 'abdulrafiuasiat2006@gmail.com';
+    }
+  });
+
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSent, setIsSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sentMessage, setSentMessage] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,8 +45,13 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
     setIsSubmitting(true);
 
     try {
-      await resetPassword(cleanEmail);
-      setIsSubmitted(true);
+      const res = await resetPassword(cleanEmail);
+      if (res.success) {
+        setIsSent(true);
+        setSentMessage(res.message);
+      } else {
+        setError(res.error || 'Failed to dispatch password reset email.');
+      }
     } catch (err: any) {
       setError(err.message || 'Unable to submit password recovery request. Please try again.');
     } finally {
@@ -56,10 +71,13 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
             Reset Your Password
           </h1>
           <p className="text-xs sm:text-sm text-[#171717]/70 mt-1">
-            Enter your account email to receive a secure password recovery authorization link.
+            {isSent
+              ? 'Password recovery link has been dispatched to your inbox.'
+              : 'Enter your email address to receive an official password reset link.'}
           </p>
         </div>
 
+        {/* Error Alert */}
         {error && (
           <div
             role="alert"
@@ -70,29 +88,41 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
           </div>
         )}
 
-        {isSubmitted ? (
+        {isSent ? (
           <div className="space-y-4">
             <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs space-y-2">
               <div className="flex items-center gap-2 font-bold text-sm text-emerald-800">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Recovery Instructions Dispatched</span>
+                <span>Reset Email Dispatched</span>
               </div>
               <p className="leading-relaxed text-emerald-800/90">
-                If an account exists under <span className="font-mono font-medium">{email}</span>, we have sent instructions with a secure one-hour password reset link.
+                An email containing a secure password reset link was dispatched to{' '}
+                <strong className="font-mono text-emerald-950 font-bold">{email}</strong>.
               </p>
-              <p className="text-[11px] text-emerald-700">
-                Please check your inbox and spam folder. For security and anti-enumeration, we do not reveal whether the email exists.
+              <p className="text-[11px] text-emerald-700 leading-relaxed">
+                Click the link in the email to set your new password. If you do not see the email within 1–2 minutes, please check your spam or junk folder.
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => onNavigate('login')}
-              className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg transition flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Return to Log In</span>
-            </button>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => onNavigate('login')}
+                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg transition flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Return to Log In</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsSent(false)}
+                className="w-full py-2 px-4 text-xs font-medium text-[#171717]/70 hover:text-[#171717] transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Send to another email</span>
+              </button>
+            </div>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4 text-xs">
@@ -106,7 +136,7 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
                   id="reset-email"
                   type="email"
                   autoComplete="email"
-                  placeholder="creator@example.com"
+                  placeholder="abdulrafiuasiat2006@gmail.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
@@ -123,11 +153,11 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
               {isSubmitting ? (
                 <>
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />
-                  <span>Processing...</span>
+                  <span>Sending Reset Email...</span>
                 </>
               ) : (
                 <>
-                  <span>Send Reset Link</span>
+                  <span>Send Reset Email</span>
                   <Send className="w-3.5 h-3.5 text-[#FF6B35]" />
                 </>
               )}
@@ -149,7 +179,7 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
         {/* Security Note */}
         <div className="mt-6 pt-5 border-t border-[#171717]/10 flex items-center justify-center gap-1.5 text-[11px] text-[#171717]/50">
           <ShieldCheck className="w-3.5 h-3.5 text-[#FF6B35]" />
-          <span>Anti-Enumeration Protection Active</span>
+          <span>Google Firebase Identity Protection Active</span>
         </div>
       </div>
     </div>

@@ -24,7 +24,7 @@ import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ImageFileState, SocialPreset, ToolType, SavedProject } from './types';
 import { WifiOff, ShieldCheck, Lock } from 'lucide-react';
 
-const PUBLIC_ROUTES = ['welcome', 'login', 'register', 'forgot-password', 'legal', 'help'];
+const PUBLIC_ROUTES = ['welcome', 'login', 'register', 'forgot-password', 'reset-password', 'legal', 'help'];
 
 function AppContent() {
   const { isAuthenticated, isLoading, intendedRoute, setIntendedRoute } = useAuth();
@@ -150,7 +150,9 @@ function AppContent() {
         {currentTab === 'welcome' && <WelcomePage onNavigate={navigateTo} />}
         {currentTab === 'login' && <LoginPage onNavigate={navigateTo} />}
         {currentTab === 'register' && <RegisterPage onNavigate={navigateTo} />}
-        {currentTab === 'forgot-password' && <ForgotPasswordPage onNavigate={navigateTo} />}
+        {(currentTab === 'forgot-password' || currentTab === 'reset-password') && (
+          <ForgotPasswordPage onNavigate={navigateTo} />
+        )}
 
         {/* PUBLIC INFORMATIONAL PAGES */}
         {currentTab === 'help' && <HelpWorkspace />}

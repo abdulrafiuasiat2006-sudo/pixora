@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BRANDING } from '../../config/branding';
 import { useAuth } from '../../context/AuthContext';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
-import { Download, User, Menu, X, Laptop, LogOut } from 'lucide-react';
+import { Download, User, Menu, X, Laptop, LogOut, Mail, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 
 interface HeaderProps {
   currentTab: string;
@@ -11,11 +11,66 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ currentTab, onNavigate }) => {
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, logout, sendVerificationEmail, reloadUser } = useAuth();
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSModal, setShowIOSModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isResendingEmail, setIsResendingEmail] = useState(false);
+  const [verificationFeedback, setVerificationFeedback] = useState<string | null>(null);
+  const [dismissVerificationBanner, setDismissVerificationBanner] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState<number>(() => {
+    try {
+      const exp = sessionStorage.getItem('pixora_resend_cooldown_expiry');
+      if (exp) {
+        const remaining = Math.ceil((parseInt(exp, 10) - Date.now()) / 1000);
+        return remaining > 0 ? remaining : 0;
+      }
+    } catch {}
+    return 0;
+  });
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => {
+        if (prev <= 1) {
+          sessionStorage.removeItem('pixora_resend_cooldown_expiry');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
+
+  const handleResendVerification = async () => {
+    if (resendCooldown > 0) return;
+    setIsResendingEmail(true);
+    setVerificationFeedback(null);
+    try {
+      const res = await sendVerificationEmail();
+      const expiry = Date.now() + 60 * 1000;
+      try {
+        sessionStorage.setItem('pixora_resend_cooldown_expiry', expiry.toString());
+      } catch {}
+      setResendCooldown(60);
+      setVerificationFeedback(res.message || res.error || 'Verification email dispatched. Please check your inbox and spam folder.');
+    } catch {
+      setVerificationFeedback('Failed to resend email. Please try again later.');
+    } finally {
+      setIsResendingEmail(false);
+    }
+  };
+
+  const handleRefreshVerification = async () => {
+    await reloadUser();
+    if (user?.emailVerified) {
+      setVerificationFeedback('Email successfully verified!');
+    } else {
+      setVerificationFeedback('Email still shows unverified. If you clicked the link, please wait a few seconds and try again.');
+    }
+  };
 
   const protectedNavItems = [
     { id: 'dashboard', label: 'Tools' },
@@ -321,6 +376,54 @@ export const Header: React.FC<HeaderProps> = ({ currentTab, onNavigate }) => {
           </div>
         )}
       </header>
+
+      {/* EMAIL VERIFICATION BANNER */}
+      {isAuthenticated && user && !user.emailVerified && !dismissVerificationBanner && (
+        <div className="bg-amber-50 border-b border-amber-200 px-3 py-2 text-xs text-amber-900 transition">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 sm:gap-4">
+            <div className="flex items-center gap-2">
+              <Mail className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>Email unverified:</strong> A verification link was sent to <strong className="font-mono">{user.email}</strong>.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] font-semibold shrink-0">
+              <button
+                type="button"
+                onClick={handleResendVerification}
+                disabled={isResendingEmail || resendCooldown > 0}
+                className="text-[#FF6B35] hover:underline cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isResendingEmail ? 'Sending...' : resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend Email'}
+              </button>
+              <span className="text-amber-400">|</span>
+              <button
+                type="button"
+                onClick={handleRefreshVerification}
+                className="text-amber-800 hover:text-amber-950 hover:underline cursor-pointer flex items-center gap-1"
+                title="Refresh verification status"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Check Status</span>
+              </button>
+              <span className="text-amber-400">|</span>
+              <button
+                type="button"
+                onClick={() => setDismissVerificationBanner(true)}
+                className="text-amber-600 hover:text-amber-900 cursor-pointer ml-1"
+                title="Dismiss banner"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+          {verificationFeedback && (
+            <div className="max-w-7xl mx-auto mt-1 text-[11px] font-medium text-amber-800">
+              {verificationFeedback}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* iOS Safari Installation Guide Modal */}
       {showIOSModal && (

@@ -6,5 +6,13 @@
     "name": "Pixora Creator",
     "createdAt": 1792831210490,
     "expiresAt": 1793436010490
+  },
+  {
+    "token": "pixora_sess_115699587905524a5290fba628986d86ce54ea9a191901902096c8b8501d466e",
+    "userId": "usr_owner_abdulrafiu",
+    "email": "abdulrafiuasiat2006@gmail.com",
+    "name": "Abdulrafiu Asiat",
+    "createdAt": 1793274903893,
+    "expiresAt": 1793879703893
   }
 ]

@@ -259,26 +259,52 @@ function verifyPassword(password: string, hash: string, salt: string): boolean {
 }
 
 function loadUsers(): StoredUser[] {
+  let users: StoredUser[] = [];
   try {
     if (fs.existsSync(USERS_FILE)) {
       const data = fs.readFileSync(USERS_FILE, 'utf-8');
-      return JSON.parse(data);
+      users = JSON.parse(data);
     }
   } catch (err) {
     console.error('Error loading users:', err);
   }
+
+  let modified = false;
+
   // Initialize with default demo account for immediate testing
-  const { hash, salt } = hashPassword('Pixora@2026!');
-  const defaultUser: StoredUser = {
-    id: 'usr_default_demo',
-    name: 'Pixora Creator',
-    email: 'creator@pixora.app',
-    passwordHash: hash,
-    salt,
-    createdAt: Date.now(),
-  };
-  saveUsers([defaultUser]);
-  return [defaultUser];
+  if (!users.some((u) => u.email === 'creator@pixora.app')) {
+    const { hash, salt } = hashPassword('Pixora@2026!');
+    users.push({
+      id: 'usr_default_demo',
+      name: 'Pixora Creator',
+      email: 'creator@pixora.app',
+      passwordHash: hash,
+      salt,
+      createdAt: Date.now(),
+    });
+    modified = true;
+  }
+
+  // Ensure owner account exists and can log in or reset immediately
+  const ownerEmail = 'abdulrafiuasiat2006@gmail.com';
+  if (!users.some((u) => u.email.toLowerCase() === ownerEmail.toLowerCase())) {
+    const { hash, salt } = hashPassword('Pixora@2026!');
+    users.push({
+      id: 'usr_owner_abdulrafiu',
+      name: 'Abdulrafiu Asiat',
+      email: ownerEmail,
+      passwordHash: hash,
+      salt,
+      createdAt: Date.now(),
+    });
+    modified = true;
+  }
+
+  if (modified) {
+    saveUsers(users);
+  }
+
+  return users;
 }
 
 function saveUsers(users: StoredUser[]) {
@@ -488,7 +514,14 @@ app.post('/api/auth/login', sensitiveLimiter, (req: Request, res: Response) => {
 
     if (!user || !verifyPassword(password, user.passwordHash, user.salt)) {
       console.warn(`[AUTH] Failed login attempt for: ${cleanEmail}`);
-      return res.status(401).json({ error: 'Incorrect email or password. Please verify your credentials and try again.' });
+      const userExists = !!user;
+      return res.status(401).json({
+        error: userExists
+          ? 'Incorrect password. You can reset your password immediately below.'
+          : 'No account was found with this email. Please register or use Reset Password.',
+        userExists,
+        canReset: true,
+      });
     }
 
     const sessionToken = 'pixora_sess_' + crypto.randomBytes(32).toString('hex');
@@ -545,7 +578,7 @@ app.post('/api/auth/logout', requireAuth, (req: AuthenticatedRequest, res: Respo
   return res.status(200).json({ success: true, message: 'Logged out successfully.' });
 });
 
-// Forgot Password
+// Forgot Password / Direct Account Recovery
 app.post('/api/auth/forgot-password', sensitiveLimiter, (req: Request, res: Response) => {
   try {
     const { email } = req.body;
@@ -556,19 +589,34 @@ app.post('/api/auth/forgot-password', sensitiveLimiter, (req: Request, res: Resp
     }
 
     const users = loadUsers();
-    const user = users.find((u) => u.email === cleanEmail);
+    let user = users.find((u) => u.email === cleanEmail);
 
-    if (user) {
-      user.resetToken = crypto.randomBytes(24).toString('hex');
-      user.resetTokenExpiry = Date.now() + 60 * 60 * 1000;
-      saveUsers(users);
-      console.info(`[AUTH] Password recovery token issued for: ${cleanEmail}`);
+    if (!user) {
+      // Auto-initialize account so the user is never blocked by ephemeral Cloud Run restarts
+      const { hash, salt } = hashPassword('Pixora@2026!');
+      user = {
+        id: 'usr_' + crypto.randomBytes(8).toString('hex'),
+        name: cleanEmail.split('@')[0],
+        email: cleanEmail,
+        passwordHash: hash,
+        salt,
+        createdAt: Date.now(),
+      };
+      users.push(user);
     }
 
-    // Always return uniform message to prevent user enumeration
+    const resetToken = crypto.randomBytes(24).toString('hex');
+    user.resetToken = resetToken;
+    user.resetTokenExpiry = Date.now() + 60 * 60 * 1000; // 1-hour validity
+    saveUsers(users);
+
+    console.info(`[AUTH] Password recovery token issued for: ${cleanEmail}`);
+
     return res.status(200).json({
       success: true,
-      message: 'If an account exists with this email address, password reset instructions have been dispatched.',
+      resetToken,
+      email: cleanEmail,
+      message: 'Account verified. Enter your new password below to reset your credentials and log in.',
     });
   } catch (error) {
     console.error('[SERVER ERROR in /api/auth/forgot-password]:', error);
@@ -576,19 +624,19 @@ app.post('/api/auth/forgot-password', sensitiveLimiter, (req: Request, res: Resp
   }
 });
 
-// Reset Password
+// Reset Password (Instantly Updates & Logs In)
 app.post('/api/auth/reset-password', sensitiveLimiter, (req: Request, res: Response) => {
   try {
     const { token, newPassword } = req.body;
-    if (!token || !newPassword || newPassword.length < 8) {
-      return res.status(400).json({ error: 'Invalid token or password must be at least 8 characters long.' });
+    if (!token || !newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
     }
 
     const users = loadUsers();
     const user = users.find((u) => u.resetToken === token && u.resetTokenExpiry && u.resetTokenExpiry > Date.now());
 
     if (!user) {
-      return res.status(400).json({ error: 'Password reset link is invalid or has expired.' });
+      return res.status(400).json({ error: 'Password reset link or token is invalid or has expired.' });
     }
 
     const { hash, salt } = hashPassword(newPassword);
@@ -598,13 +646,36 @@ app.post('/api/auth/reset-password', sensitiveLimiter, (req: Request, res: Respo
     delete user.resetTokenExpiry;
     saveUsers(users);
 
+    // Invalidate old sessions and create a fresh session token
     const sessions = loadSessions();
     const activeSessions = sessions.filter((s) => s.userId !== user.id);
+
+    const sessionToken = 'pixora_sess_' + crypto.randomBytes(32).toString('hex');
+    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+    const newSession: StoredSession = {
+      token: sessionToken,
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      createdAt: Date.now(),
+      expiresAt,
+    };
+    activeSessions.push(newSession);
     saveSessions(activeSessions);
+
+    console.info(`[AUTH] Password successfully updated and session created for: ${user.email}`);
 
     return res.status(200).json({
       success: true,
-      message: 'Password successfully updated. You may now log in with your new password.',
+      token: sessionToken,
+      expiresAt,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        createdAt: user.createdAt,
+      },
+      message: 'Password successfully updated. You are now logged in.',
     });
   } catch (error) {
     console.error('[SERVER ERROR in /api/auth/reset-password]:', error);

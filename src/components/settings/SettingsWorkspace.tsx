@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { ImageFormat } from '../../types';
 import {
@@ -12,6 +12,9 @@ import {
   AlertTriangle,
   HardDrive,
   FileCode,
+  Mail,
+  CheckCircle2,
+  RefreshCw,
 } from 'lucide-react';
 
 interface SettingsWorkspaceProps {
@@ -23,11 +26,46 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
   onOpenAuth,
   onNavigate,
 }) => {
-  const { user, isAuthenticated, isGuest, preferences, updatePreferences, logout, deleteAccount } =
-    useAuth();
+  const {
+    user,
+    isAuthenticated,
+    isGuest,
+    preferences,
+    updatePreferences,
+    logout,
+    deleteAccount,
+    sendVerificationEmail,
+    reloadUser,
+  } = useAuth();
 
   const [savedNotice, setSavedNotice] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState<number>(() => {
+    try {
+      const exp = sessionStorage.getItem('pixora_resend_cooldown_expiry');
+      if (exp) {
+        const remaining = Math.ceil((parseInt(exp, 10) - Date.now()) / 1000);
+        return remaining > 0 ? remaining : 0;
+      }
+    } catch {}
+    return 0;
+  });
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => {
+        if (prev <= 1) {
+          sessionStorage.removeItem('pixora_resend_cooldown_expiry');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
 
   const handleFormatChange = (fmt: ImageFormat) => {
     updatePreferences({ defaultFormat: fmt });
@@ -96,7 +134,20 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
               </div>
               <div>
                 <h3 className="text-sm font-bold text-[#171717]">{user?.name}</h3>
-                <span className="text-xs text-[#171717]/60 font-mono">{user?.email}</span>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className="text-xs text-[#171717]/60 font-mono">{user?.email}</span>
+                  {user?.emailVerified ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-full">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                      <span>Verified</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded-full">
+                      <Mail className="w-3 h-3 text-amber-600" />
+                      <span>Unverified</span>
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -111,6 +162,62 @@ export const SettingsWorkspace: React.FC<SettingsWorkspaceProps> = ({
               </button>
             </div>
           </div>
+
+          {!user?.emailVerified && (
+            <div className="mt-3.5 p-3 bg-amber-50 border border-amber-200/80 rounded-lg flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
+              <div className="text-amber-900 leading-relaxed">
+                <span>Your email has not been verified yet. Check your inbox for the link from Firebase.</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isResending || resendCooldown > 0}
+                  onClick={async () => {
+                    if (resendCooldown > 0) return;
+                    setIsResending(true);
+                    setVerificationNotice(null);
+                    try {
+                      const res = await sendVerificationEmail();
+                      const expiry = Date.now() + 60 * 1000;
+                      try {
+                        sessionStorage.setItem('pixora_resend_cooldown_expiry', expiry.toString());
+                      } catch {}
+                      setResendCooldown(60);
+                      setVerificationNotice(res.message || res.error || 'Verification email dispatched. Please check your spam/junk folder.');
+                    } catch {
+                      setVerificationNotice('Failed to dispatch email. Please try again later.');
+                    } finally {
+                      setIsResending(false);
+                    }
+                  }}
+                  className="px-2.5 py-1 text-[11px] font-semibold bg-[#FF6B35] text-white rounded hover:bg-[#e05825] transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isResending ? 'Sending...' : resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend Email'}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await reloadUser();
+                    if (user?.emailVerified) {
+                      setVerificationNotice('Email verified!');
+                    } else {
+                      setVerificationNotice('Still unverified. Please check your inbox.');
+                    }
+                  }}
+                  className="px-2 py-1 text-[11px] font-medium text-amber-900 hover:underline cursor-pointer flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Check Status</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {verificationNotice && (
+            <div className="mt-2 text-[11px] text-amber-800 font-medium">
+              {verificationNotice}
+            </div>
+          )}
 
           <div className="mt-4 text-xs text-[#171717]/70 leading-relaxed">
             {isGuest ? (

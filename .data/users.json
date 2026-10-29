@@ -14,5 +14,13 @@
     "passwordHash": "cf234da5a4565b4387bd6efc3ff3c947c374a35cd6a088ce7191f1453d9701bfbe2e9b836ab5b9a19eb867593d7b7feed5fdde2b8f33ef7481d32b2f0da6663e",
     "salt": "41ec197feb438c3c3373c3559202fcde",
     "createdAt": 1792831221420
+  },
+  {
+    "id": "usr_owner_abdulrafiu",
+    "name": "Abdulrafiu Asiat",
+    "email": "abdulrafiuasiat2006@gmail.com",
+    "passwordHash": "51d82311b117220164bcc25f11b3eb56029190089be8867799ba24e2887eabfcb1dee2836f1f9f141506baf21ba8f98224d0ec064aea399ba87bb4a6045b0236",
+    "salt": "f7a72a575fd9f8b2b49ea99737edda39",
+    "createdAt": 1793274885286
   }
 ]

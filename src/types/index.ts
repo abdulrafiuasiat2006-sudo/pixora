@@ -152,6 +152,7 @@ export interface UserProfile {
   name: string;
   isGuest: boolean;
   createdAt: number;
+  emailVerified?: boolean;
   preferences: UserPreferences;
 }
 
