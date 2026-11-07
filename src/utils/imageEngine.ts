@@ -113,11 +113,31 @@ export async function splitImage(
   config: SplitConfig
 ): Promise<SplitResult> {
   const { mode, rows, cols, format, quality, fileNamePrefix, carouselSlideCount } = config;
-  const activeRows = mode === 'carousel' ? 1 : rows;
-  const activeCols = mode === 'carousel' ? carouselSlideCount : cols;
 
-  const srcW = img.naturalWidth;
-  const srcH = img.naturalHeight;
+  let activeRows = rows;
+  let activeCols = cols;
+
+  if (mode === 'rows') {
+    activeRows = Math.max(1, rows);
+    activeCols = 1;
+  } else if (mode === 'columns') {
+    activeRows = 1;
+    activeCols = Math.max(1, cols);
+  } else if (mode === 'carousel') {
+    activeRows = 1;
+    activeCols = Math.max(2, carouselSlideCount || 2);
+  } else {
+    // grid: rows x cols
+    activeRows = Math.max(1, rows);
+    activeCols = Math.max(1, cols);
+  }
+
+  const srcW = img.naturalWidth || img.width;
+  const srcH = img.naturalHeight || img.height;
+
+  if (!srcW || !srcH) {
+    throw new Error('Image dimensions could not be determined. Please ensure the image is loaded.');
+  }
 
   const tiles: SplitTile[] = [];
   let index = 1;
@@ -126,7 +146,7 @@ export async function splitImage(
     // Exact vertical slice calculation
     const startY = Math.round((r * srcH) / activeRows);
     const endY = Math.round(((r + 1) * srcH) / activeRows);
-    const tileH = endY - startY;
+    const tileH = Math.max(1, endY - startY);
 
     for (let c = 0; c < activeCols; c++) {
       // Exact horizontal slice calculation

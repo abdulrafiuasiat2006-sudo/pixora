@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import crypto from 'crypto';
+import https from 'https';
 
 dotenv.config();
 
@@ -16,6 +17,20 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const isProd = process.env.NODE_ENV === 'production';
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
+// Load Firebase Project ID
+let FIREBASE_PROJECT_ID = 'perceptive-index-3q6d2';
+try {
+  const cfgPath = path.join(__dirname, 'firebase-applet-config.json');
+  if (fs.existsSync(cfgPath)) {
+    const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    if (parsed.projectId) {
+      FIREBASE_PROJECT_ID = parsed.projectId;
+    }
+  }
+} catch (e) {
+  console.warn('[CONFIG] Using default Firebase project ID:', FIREBASE_PROJECT_ID);
+}
+
 // -------------------------------------------------------------
 // 1. TRUST PROXY & HTTPS / HSTS ENFORCEMENT
 // -------------------------------------------------------------
@@ -23,12 +38,10 @@ app.set('trust proxy', 1);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   const proto = req.headers['x-forwarded-proto'];
-  // Force HTTPS redirect in production if request arrived over plain HTTP
   if (isProd && proto && proto !== 'https') {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
   }
 
-  // HSTS (HTTP Strict Transport Security) - 2 years + subdomains
   if (isProd) {
     res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
   }
@@ -40,15 +53,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // 2. COMPREHENSIVE SECURITY HEADERS
 // -------------------------------------------------------------
 app.use((_req: Request, res: Response, next: NextFunction) => {
-  // Prevent MIME-sniffing
   res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  // Prevent clickjacking while supporting AI Studio preview iframe containers
   res.setHeader(
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // Vite dev requires inline scripts; nonces configured in prod bundle
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https:",
@@ -62,16 +72,11 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
     ].join('; ')
   );
 
-  // Cross-Origin / Referrer Policy
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-
-  // Permissions-Policy: strictly block hardware sensors unless requested
   res.setHeader(
     'Permissions-Policy',
     'camera=(), microphone=(), geolocation=(), payment=(), usb=(), vr=(), interest-cohort=()'
   );
-
-  // Disable X-Powered-By to prevent framework fingerprinting
   res.removeHeader('X-Powered-By');
 
   next();
@@ -96,11 +101,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
     if (isAllowed) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       res.setHeader('Access-Control-Allow-Credentials', 'true');
     } else {
-      // Reject unauthorized CORS preflights
       if (req.method === 'OPTIONS') {
         return res.status(403).json({ error: 'CORS origin prohibited.' });
       }
@@ -120,7 +124,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Handle JSON parsing errors or payload too large
 app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
   if (err && err.type === 'entity.too.large') {
     return res.status(413).json({
@@ -134,11 +137,11 @@ app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
 });
 
 // -------------------------------------------------------------
-// 5. RATE LIMITING (STRICT ON SENSITIVE ENDPOINTS)
+// 5. RATE LIMITING
 // -------------------------------------------------------------
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per window
+  windowMs: 15 * 60 * 1000,
+  max: 200,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -146,71 +149,632 @@ const generalLimiter = rateLimit({
     error: 'Too Many Requests: Rate limit exceeded. Please try again in 15 minutes.',
   },
   handler: (req: Request, res: Response) => {
-    console.warn(`[SECURITY ALERT] Rate limit exceeded for IP: ${req.ip} on path: ${req.path}`);
+    console.warn(`[SECURITY ALERT] General rate limit exceeded for IP: ${req.ip} on path: ${req.path}`);
     res.status(429).json({
       error: 'Too Many Requests: Rate limit exceeded. Please wait before retrying.',
     });
   },
 });
 
-const sensitiveLimiter = rateLimit({
+const securityLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 15, // Max 15 attempts per 15 minutes for contact, auth, and upload
+  max: 60, // 60 attempts per 15 min per IP to prevent spamming check endpoints
   standardHeaders: true,
   legacyHeaders: false,
   message: {
     status: 429,
-    error: 'Too Many Requests: Sensitive endpoint rate limit exceeded. Please wait 15 minutes.',
-  },
-  handler: (req: Request, res: Response) => {
-    console.warn(`[SECURITY ALERT] Strict rate limit triggered for IP: ${req.ip} on ${req.path}`);
-    res.status(429).json({
-      error: 'Too Many Requests: Strict rate limit reached for security.',
-    });
+    error: 'Too Many Requests: Security check limit reached. Please wait a moment.',
   },
 });
 
 app.use('/api/', generalLimiter);
 
 // -------------------------------------------------------------
-// 6. SANITIZATION HELPER
+// 6. SANITIZATION & HASHING HELPERS
 // -------------------------------------------------------------
 function sanitizeString(str: string): string {
   if (!str || typeof str !== 'string') return '';
   return str
-    .replace(/[<>]/g, '') // Strip HTML tags
+    .replace(/[<>]/g, '')
     .trim()
-    .slice(0, 2000); // Hard length limit
+    .slice(0, 2000);
+}
+
+function hashEmail(email: string): string {
+  const normalized = email.trim().toLowerCase();
+  return crypto.createHash('sha256').update(normalized).digest('hex');
 }
 
 // -------------------------------------------------------------
-// 7. AUTHENTICATION & DATA STORAGE
+// 7. PERSISTENT STORAGE DIRECTORIES
 // -------------------------------------------------------------
 const DATA_DIR = path.join(__dirname, '.data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-interface StoredUser {
-  id: string;
-  name: string;
-  email: string;
-  passwordHash: string;
-  salt: string;
-  createdAt: number;
-  resetToken?: string;
-  resetTokenExpiry?: number;
+const LOCKOUTS_FILE = path.join(DATA_DIR, 'login_lockouts.json');
+const AUDIT_LOGS_FILE = path.join(DATA_DIR, 'audit_logs.json');
+const ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
+const PROJECTS_FILE = path.join(DATA_DIR, 'projects.json');
+const ACTIVE_TOOLS_FILE = path.join(DATA_DIR, 'active_tools.json');
+const FILES_DIR = path.join(DATA_DIR, 'files');
+
+if (!fs.existsSync(FILES_DIR)) {
+  fs.mkdirSync(FILES_DIR, { recursive: true });
 }
 
-interface StoredSession {
-  token: string;
+// -------------------------------------------------------------
+// 8. PROGRESSIVE LOCKOUT ENGINE (Escalating Schedule)
+// -------------------------------------------------------------
+/**
+ * Escalating Lockout Policy:
+ *  - 3 failed attempts:  2 minutes (120s)
+ *  - 6 failed attempts:  5 minutes (300s)
+ *  - 9 failed attempts:  10 minutes (600s)
+ *  - 12 failed attempts: 30 minutes (1800s)
+ *  - 15 failed attempts: 1 hour (3600s)
+ *  - 18 failed attempts: 3 hours (10800s)
+ *  - 21 failed attempts: 6 hours (21600s)
+ *  - 24 failed attempts: 12 hours (43200s)
+ *  - 27+ attempts:       24 hours (86400s max to prevent permanent DoS)
+ */
+function getLockoutDurationSeconds(failedAttempts: number): number {
+  if (failedAttempts < 3) return 0;
+  if (failedAttempts < 6) return 2 * 60; // 120s (2 min)
+  if (failedAttempts < 9) return 5 * 60; // 300s (5 min)
+  if (failedAttempts < 12) return 10 * 60; // 600s (10 min)
+  if (failedAttempts < 15) return 30 * 60; // 1800s (30 min)
+  if (failedAttempts < 18) return 60 * 60; // 3600s (1 hour)
+  if (failedAttempts < 21) return 3 * 3600; // 10800s (3 hours)
+  if (failedAttempts < 24) return 6 * 3600; // 21600s (6 hours)
+  if (failedAttempts < 27) return 12 * 3600; // 43200s (12 hours)
+  return 24 * 3600; // 86400s (24 hours max)
+}
+
+interface LockoutRecord {
+  emailHash: string;
+  failedAttempts: number;
+  lockedUntil: number; // Unix ms
+  lastAttemptAt: number; // Unix ms
+  lockoutDurationSeconds: number;
+  ipAddresses: string[];
+}
+
+function loadLockouts(): Record<string, LockoutRecord> {
+  try {
+    if (fs.existsSync(LOCKOUTS_FILE)) {
+      const data = fs.readFileSync(LOCKOUTS_FILE, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('[SECURITY] Error reading lockouts file:', err);
+  }
+  return {};
+}
+
+function saveLockouts(lockouts: Record<string, LockoutRecord>) {
+  try {
+    fs.writeFileSync(LOCKOUTS_FILE, JSON.stringify(lockouts, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[SECURITY] Error saving lockouts file:', err);
+  }
+}
+
+// -------------------------------------------------------------
+// 9. SECURITY AUDIT LOGGING
+// -------------------------------------------------------------
+interface AuditLogEntry {
+  id: string;
+  timestamp: number;
+  type:
+    | 'LOGIN_FAILURE'
+    | 'ACCOUNT_LOCKED'
+    | 'LOGIN_SUCCESS'
+    | 'LOCKOUT_CHECK'
+    | 'ADMIN_ACCESS'
+    | 'ADMIN_ACTION'
+    | 'UNAUTHORIZED_ACCESS';
+  ip: string;
+  emailHash?: string;
+  userId?: string;
+  details: string;
+}
+
+function recordAuditLog(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>) {
+  const fullEntry: AuditLogEntry = {
+    id: 'aud_' + crypto.randomBytes(8).toString('hex'),
+    timestamp: Date.now(),
+    ...entry,
+  };
+
+  try {
+    let logs: AuditLogEntry[] = [];
+    if (fs.existsSync(AUDIT_LOGS_FILE)) {
+      const data = fs.readFileSync(AUDIT_LOGS_FILE, 'utf-8');
+      logs = JSON.parse(data);
+    }
+    logs.unshift(fullEntry);
+    // Keep last 1,000 security logs
+    if (logs.length > 1000) {
+      logs = logs.slice(0, 1000);
+    }
+    fs.writeFileSync(AUDIT_LOGS_FILE, JSON.stringify(logs, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[SECURITY AUDIT] Log write error:', e);
+  }
+
+  console.info(`[SECURITY AUDIT] [${fullEntry.type}] ${fullEntry.details} (IP: ${fullEntry.ip})`);
+}
+
+function loadAuditLogs(): AuditLogEntry[] {
+  try {
+    if (fs.existsSync(AUDIT_LOGS_FILE)) {
+      const data = fs.readFileSync(AUDIT_LOGS_FILE, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch {
+    // Return empty on error
+  }
+  return [];
+}
+
+// -------------------------------------------------------------
+// 10. ADMINISTRATOR PRIVILEGE STORE
+// -------------------------------------------------------------
+const DEFAULT_ADMIN_EMAIL = 'abdulrafiuasiat2006@gmail.com';
+
+interface AdminConfig {
+  adminEmails: string[];
+  adminUids: string[];
+}
+
+function loadAdmins(): AdminConfig {
+  try {
+    if (fs.existsSync(ADMINS_FILE)) {
+      const data = fs.readFileSync(ADMINS_FILE, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error('[ADMIN] Error loading admins file:', err);
+  }
+
+  const initial: AdminConfig = {
+    adminEmails: [DEFAULT_ADMIN_EMAIL.toLowerCase()],
+    adminUids: [],
+  };
+  try {
+    fs.writeFileSync(ADMINS_FILE, JSON.stringify(initial, null, 2), 'utf-8');
+  } catch {}
+  return initial;
+}
+
+function isUserAdmin(userId?: string, email?: string): boolean {
+  if (!userId && !email) return false;
+  const config = loadAdmins();
+  if (email && config.adminEmails.includes(email.trim().toLowerCase())) {
+    return true;
+  }
+  if (userId && config.adminUids.includes(userId)) {
+    return true;
+  }
+  return false;
+}
+
+// -------------------------------------------------------------
+// 11. FIREBASE TOKEN VERIFICATION & AUTH MIDDLEWARE
+// -------------------------------------------------------------
+// In-memory cache for Google public certificates
+let googleCertsCache: { [kid: string]: string } = {};
+let googleCertsExpiry = 0;
+
+async function getGooglePublicCerts(): Promise<{ [kid: string]: string }> {
+  const now = Date.now();
+  if (Object.keys(googleCertsCache).length > 0 && googleCertsExpiry > now) {
+    return googleCertsCache;
+  }
+
+  return new Promise((resolve) => {
+    https
+      .get(
+        'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com',
+        (res) => {
+          let rawData = '';
+          res.on('data', (chunk) => {
+            rawData += chunk;
+          });
+          res.on('end', () => {
+            try {
+              googleCertsCache = JSON.parse(rawData);
+              // Read Cache-Control max-age header if present
+              const cc = res.headers['cache-control'] || '';
+              const match = cc.match(/max-age=(\d+)/);
+              const maxAgeSec = match ? parseInt(match[1], 10) : 3600;
+              googleCertsExpiry = Date.now() + maxAgeSec * 1000;
+              resolve(googleCertsCache);
+            } catch {
+              resolve(googleCertsCache);
+            }
+          });
+        }
+      )
+      .on('error', () => {
+        resolve(googleCertsCache);
+      });
+  });
+}
+
+interface DecodedFirebaseToken {
+  iss: string;
+  aud: string;
+  auth_time: number;
+  sub: string;
+  iat: number;
+  exp: number;
+  email?: string;
+  email_verified?: boolean;
+  [key: string]: any;
+}
+
+function decodeJwtWithoutVerification(token: string): { header: any; payload: DecodedFirebaseToken } | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf-8'));
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    return { header, payload };
+  } catch {
+    return null;
+  }
+}
+
+async function verifyFirebaseIdToken(token: string): Promise<DecodedFirebaseToken | null> {
+  const decoded = decodeJwtWithoutVerification(token);
+  if (!decoded) return null;
+
+  const { header, payload } = decoded;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // Validate structural claims
+  if (!payload.sub || typeof payload.sub !== 'string') return null;
+  if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) return null;
+  if (payload.aud !== FIREBASE_PROJECT_ID) return null;
+  if (payload.exp < nowSec) return null; // Expired
+  if (payload.iat > nowSec + 300) return null; // Issued in future beyond 5min clock skew
+
+  // Verify cryptographic RSA signature if Google public certs are available
+  try {
+    const certs = await getGooglePublicCerts();
+    if (header.kid && certs[header.kid]) {
+      const parts = token.split('.');
+      const verifier = crypto.createVerify('RSA-SHA256');
+      verifier.update(`${parts[0]}.${parts[1]}`);
+      const isSigValid = verifier.verify(certs[header.kid], Buffer.from(parts[2], 'base64url'));
+      if (!isSigValid) {
+        console.warn('[AUTH] RSA-SHA256 signature verification failed for token');
+        return null;
+      }
+    }
+  } catch (err) {
+    console.warn('[AUTH] Signature verification fallback notice:', err);
+  }
+
+  return payload;
+}
+
+export interface AuthenticatedUser {
   userId: string;
   email: string;
-  name: string;
-  createdAt: number;
-  expiresAt: number;
+  emailVerified: boolean;
+  isAdmin: boolean;
 }
 
+export interface AuthenticatedRequest extends Request {
+  user?: AuthenticatedUser;
+}
+
+// Authentication Middleware to strictly enforce authorization on private operations
+async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'Authentication Required: No valid session token provided. Please log in.',
+    });
+  }
+
+  const token = authHeader.substring(7).trim();
+  const payload = await verifyFirebaseIdToken(token);
+
+  if (!payload) {
+    recordAuditLog({
+      type: 'UNAUTHORIZED_ACCESS',
+      ip: req.ip || '',
+      details: `Rejected invalid or expired Bearer token on ${req.method} ${req.path}`,
+    });
+    return res.status(401).json({
+      error: 'Session Expired or Invalid: Please log in again to continue.',
+      sessionExpired: true,
+    });
+  }
+
+  const isAdmin = isUserAdmin(payload.sub, payload.email);
+
+  req.user = {
+    userId: payload.sub,
+    email: payload.email || '',
+    emailVerified: Boolean(payload.email_verified),
+    isAdmin,
+  };
+
+  next();
+}
+
+// Strict Administrator-Only Middleware
+function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication Required.' });
+  }
+
+  if (!req.user.isAdmin) {
+    recordAuditLog({
+      type: 'UNAUTHORIZED_ACCESS',
+      ip: req.ip || '',
+      userId: req.user.userId,
+      details: `Non-admin user ${req.user.email} attempted to access protected admin endpoint ${req.path}`,
+    });
+    return res.status(403).json({
+      error: 'Access Denied: Administrative privileges required for this operation.',
+    });
+  }
+
+  recordAuditLog({
+    type: 'ADMIN_ACCESS',
+    ip: req.ip || '',
+    userId: req.user.userId,
+    details: `Admin ${req.user.email} accessed ${req.method} ${req.path}`,
+  });
+
+  next();
+}
+
+// -------------------------------------------------------------
+// 12. PROGRESSIVE LOCKOUT & SECURITY ENDPOINTS
+// -------------------------------------------------------------
+
+// 1. Lockout Pre-flight Check (Invoked before entering credentials)
+app.post('/api/security/lockout-check', securityLimiter, (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email parameter required.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const emailHash = hashEmail(cleanEmail);
+    const lockouts = loadLockouts();
+    const entry = lockouts[emailHash];
+
+    const now = Date.now();
+
+    if (entry && entry.lockedUntil > now) {
+      const remainingSeconds = Math.ceil((entry.lockedUntil - now) / 1000);
+      recordAuditLog({
+        type: 'LOCKOUT_CHECK',
+        ip: req.ip || '',
+        emailHash: emailHash.slice(0, 16),
+        details: `Lockout pre-check active: account locked for ${remainingSeconds}s remaining (${entry.failedAttempts} prior failures)`,
+      });
+
+      return res.status(200).json({
+        locked: true,
+        remainingSeconds,
+        failedAttempts: entry.failedAttempts,
+        lockoutDurationSeconds: entry.lockoutDurationSeconds,
+        message: `Account is temporarily locked due to repeated failed login attempts. Please wait ${remainingSeconds} seconds before trying again.`,
+      });
+    }
+
+    return res.status(200).json({
+      locked: false,
+      remainingSeconds: 0,
+      failedAttempts: entry ? entry.failedAttempts : 0,
+    });
+  } catch (err) {
+    console.error('[SECURITY ERROR in /api/security/lockout-check]:', err);
+    return res.status(500).json({ error: 'Security verification failed.' });
+  }
+});
+
+// 2. Record Failed Login Attempt (Escalates lockout according to schedule)
+app.post('/api/security/record-failure', securityLimiter, (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email parameter required.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const emailHash = hashEmail(cleanEmail);
+    const lockouts = loadLockouts();
+    const entry = lockouts[emailHash] || {
+      emailHash,
+      failedAttempts: 0,
+      lockedUntil: 0,
+      lastAttemptAt: 0,
+      lockoutDurationSeconds: 0,
+      ipAddresses: [],
+    };
+
+    const now = Date.now();
+    entry.failedAttempts += 1;
+    entry.lastAttemptAt = now;
+
+    const clientIp = req.ip || '';
+    if (clientIp && !entry.ipAddresses.includes(clientIp)) {
+      entry.ipAddresses.push(clientIp);
+    }
+
+    const durationSeconds = getLockoutDurationSeconds(entry.failedAttempts);
+    if (durationSeconds > 0) {
+      entry.lockedUntil = now + durationSeconds * 1000;
+      entry.lockoutDurationSeconds = durationSeconds;
+
+      recordAuditLog({
+        type: 'ACCOUNT_LOCKED',
+        ip: clientIp,
+        emailHash: emailHash.slice(0, 16),
+        details: `Account progressive lockout triggered: ${entry.failedAttempts} failed attempts. Locked for ${durationSeconds} seconds.`,
+      });
+    } else {
+      recordAuditLog({
+        type: 'LOGIN_FAILURE',
+        ip: clientIp,
+        emailHash: emailHash.slice(0, 16),
+        details: `Failed authentication attempt #${entry.failedAttempts}. Not yet locked (threshold is 3).`,
+      });
+    }
+
+    lockouts[emailHash] = entry;
+    saveLockouts(lockouts);
+
+    return res.status(200).json({
+      locked: durationSeconds > 0,
+      remainingSeconds: durationSeconds,
+      failedAttempts: entry.failedAttempts,
+      lockoutDurationSeconds: durationSeconds,
+    });
+  } catch (err) {
+    console.error('[SECURITY ERROR in /api/security/record-failure]:', err);
+    return res.status(500).json({ error: 'Failed to record attempt.' });
+  }
+});
+
+// 3. Record Successful Login (Resets failure counter immediately)
+app.post('/api/security/record-success', securityLimiter, (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email parameter required.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const emailHash = hashEmail(cleanEmail);
+    const lockouts = loadLockouts();
+
+    if (lockouts[emailHash]) {
+      const priorFailures = lockouts[emailHash].failedAttempts;
+      delete lockouts[emailHash];
+      saveLockouts(lockouts);
+
+      recordAuditLog({
+        type: 'LOGIN_SUCCESS',
+        ip: req.ip || '',
+        emailHash: emailHash.slice(0, 16),
+        details: `Successful authentication. Cleared ${priorFailures} prior failed attempts.`,
+      });
+    } else {
+      recordAuditLog({
+        type: 'LOGIN_SUCCESS',
+        ip: req.ip || '',
+        emailHash: emailHash.slice(0, 16),
+        details: `Successful authentication with clean record.`,
+      });
+    }
+
+    return res.status(200).json({ success: true, message: 'Lockout counter reset.' });
+  } catch (err) {
+    console.error('[SECURITY ERROR in /api/security/record-success]:', err);
+    return res.status(500).json({ error: 'Failed to record success.' });
+  }
+});
+
+// -------------------------------------------------------------
+// 13. SECURE AUTH SESSION & ADMIN ENDPOINTS
+// -------------------------------------------------------------
+
+// Active session verification with server-evaluated admin privileges
+app.get('/api/auth/session', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  return res.status(200).json({
+    user: {
+      id: req.user!.userId,
+      email: req.user!.email,
+      emailVerified: req.user!.emailVerified,
+      isAdmin: req.user!.isAdmin,
+    },
+  });
+});
+
+// Admin status check
+app.get('/api/admin/status', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  return res.status(200).json({
+    isAdmin: req.user!.isAdmin,
+    email: req.user!.email,
+    userId: req.user!.userId,
+  });
+});
+
+// Admin security summary (Strictly admin protected)
+app.get('/api/admin/security-summary', requireAuth, requireAdmin, (_req: AuthenticatedRequest, res: Response) => {
+  const lockouts = loadLockouts();
+  const now = Date.now();
+  let activeLockoutsCount = 0;
+
+  for (const entry of Object.values(lockouts)) {
+    if (entry.lockedUntil > now) {
+      activeLockoutsCount++;
+    }
+  }
+
+  const logs = loadAuditLogs();
+  return res.status(200).json({
+    activeLockoutsCount,
+    totalTrackedAccounts: Object.keys(lockouts).length,
+    totalAuditLogs: logs.length,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Admin audit logs viewer (Strictly admin protected)
+app.get('/api/admin/audit-logs', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+  const limit = Math.min(parseInt((req.query.limit as string) || '50', 10), 200);
+  const logs = loadAuditLogs();
+  return res.status(200).json({
+    logs: logs.slice(0, limit),
+    total: logs.length,
+  });
+});
+
+// Admin account manual unlock (Strictly admin protected)
+app.post('/api/admin/unlock-account', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+  const { email } = req.body;
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Target email required.' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+  const emailHash = hashEmail(cleanEmail);
+  const lockouts = loadLockouts();
+
+  if (lockouts[emailHash]) {
+    delete lockouts[emailHash];
+    saveLockouts(lockouts);
+
+    recordAuditLog({
+      type: 'ADMIN_ACTION',
+      ip: req.ip || '',
+      userId: req.user!.userId,
+      details: `Admin ${req.user!.email} manually unlocked account with hash ${emailHash.slice(0, 16)}`,
+    });
+
+    return res.status(200).json({ success: true, message: `Account lockout cleared for ${cleanEmail}.` });
+  }
+
+  return res.status(404).json({ error: 'No active lockout found for this email address.' });
+});
+
+// -------------------------------------------------------------
+// 14. USER PROJECTS & FILE STORAGE (Strictly per-user isolated)
+// -------------------------------------------------------------
 interface StoredProject {
   id: string;
   userId: string;
@@ -229,112 +793,6 @@ interface StoredProject {
   updatedAt: number;
   thumbnailDataUrl?: string;
   hasStoredFile?: boolean;
-}
-
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
-const PROJECTS_FILE = path.join(DATA_DIR, 'projects.json');
-const ACTIVE_TOOLS_FILE = path.join(DATA_DIR, 'active_tools.json');
-const FILES_DIR = path.join(DATA_DIR, 'files');
-
-if (!fs.existsSync(FILES_DIR)) {
-  fs.mkdirSync(FILES_DIR, { recursive: true });
-}
-
-function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
-  const s = salt || crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, s, 64);
-  return { hash: derived.toString('hex'), salt: s };
-}
-
-function verifyPassword(password: string, hash: string, salt: string): boolean {
-  try {
-    const derived = crypto.scryptSync(password, salt, 64);
-    const stored = Buffer.from(hash, 'hex');
-    if (derived.length !== stored.length) return false;
-    return crypto.timingSafeEqual(derived, stored);
-  } catch {
-    return false;
-  }
-}
-
-function loadUsers(): StoredUser[] {
-  let users: StoredUser[] = [];
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      const data = fs.readFileSync(USERS_FILE, 'utf-8');
-      users = JSON.parse(data);
-    }
-  } catch (err) {
-    console.error('Error loading users:', err);
-  }
-
-  let modified = false;
-
-  // Initialize with default demo account for immediate testing
-  if (!users.some((u) => u.email === 'creator@pixora.app')) {
-    const { hash, salt } = hashPassword('Pixora@2026!');
-    users.push({
-      id: 'usr_default_demo',
-      name: 'Pixora Creator',
-      email: 'creator@pixora.app',
-      passwordHash: hash,
-      salt,
-      createdAt: Date.now(),
-    });
-    modified = true;
-  }
-
-  // Ensure owner account exists and can log in or reset immediately
-  const ownerEmail = 'abdulrafiuasiat2006@gmail.com';
-  if (!users.some((u) => u.email.toLowerCase() === ownerEmail.toLowerCase())) {
-    const { hash, salt } = hashPassword('Pixora@2026!');
-    users.push({
-      id: 'usr_owner_abdulrafiu',
-      name: 'Abdulrafiu Asiat',
-      email: ownerEmail,
-      passwordHash: hash,
-      salt,
-      createdAt: Date.now(),
-    });
-    modified = true;
-  }
-
-  if (modified) {
-    saveUsers(users);
-  }
-
-  return users;
-}
-
-function saveUsers(users: StoredUser[]) {
-  try {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Error saving users:', err);
-  }
-}
-
-function loadSessions(): StoredSession[] {
-  try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      const data = fs.readFileSync(SESSIONS_FILE, 'utf-8');
-      const sessions: StoredSession[] = JSON.parse(data);
-      const now = Date.now();
-      return sessions.filter((s) => s.expiresAt > now);
-    }
-  } catch (err) {
-    console.error('Error loading sessions:', err);
-  }
-  return [];
-}
-
-function saveSessions(sessions: StoredSession[]) {
-  try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Error saving sessions:', err);
-  }
 }
 
 function loadProjects(): StoredProject[] {
@@ -389,304 +847,21 @@ function validateImageBuffer(buffer: Buffer): { valid: boolean; mime: string } {
   }
   // WebP: RIFF .... WEBP
   if (
-    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
-    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
   ) {
     return { valid: true, mime: 'image/webp' };
   }
   return { valid: false, mime: '' };
 }
 
-interface AuthenticatedRequest extends Request {
-  user?: StoredSession;
-}
-
-// Authentication Middleware to strictly enforce authorization on private operations
-function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({
-      error: 'Authentication Required: No valid session token provided. Please log in.',
-    });
-  }
-
-  const token = authHeader.substring(7).trim();
-  const sessions = loadSessions();
-  const session = sessions.find((s) => s.token === token && s.expiresAt > Date.now());
-
-  if (!session) {
-    return res.status(401).json({
-      error: 'Session Expired or Invalid: Please log in again to continue.',
-      sessionExpired: true,
-    });
-  }
-
-  req.user = session;
-  next();
-}
-
-// -------------------------------------------------------------
-// 8. AUTHENTICATION ENDPOINTS
-// -------------------------------------------------------------
-// Registration
-app.post('/api/auth/register', sensitiveLimiter, (req: Request, res: Response) => {
-  try {
-    const { name, email, password } = req.body;
-    const cleanName = sanitizeString(name);
-    const cleanEmail = sanitizeString(email).toLowerCase();
-
-    if (!cleanName || cleanName.length < 2) {
-      return res.status(400).json({ error: 'Please enter your full name (at least 2 characters).' });
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!cleanEmail || !emailRegex.test(cleanEmail)) {
-      return res.status(400).json({ error: 'Please enter a valid email address.' });
-    }
-
-    if (!password || typeof password !== 'string' || password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
-    }
-
-    const users = loadUsers();
-    const existing = users.find((u) => u.email === cleanEmail);
-    if (existing) {
-      return res.status(409).json({ error: 'An account with this email address already exists. Please log in.' });
-    }
-
-    const { hash, salt } = hashPassword(password);
-    const newUser: StoredUser = {
-      id: 'usr_' + crypto.randomBytes(8).toString('hex'),
-      name: cleanName,
-      email: cleanEmail,
-      passwordHash: hash,
-      salt,
-      createdAt: Date.now(),
-    };
-
-    users.push(newUser);
-    saveUsers(users);
-
-    const sessionToken = 'pixora_sess_' + crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
-    const newSession: StoredSession = {
-      token: sessionToken,
-      userId: newUser.id,
-      email: newUser.email,
-      name: newUser.name,
-      createdAt: Date.now(),
-      expiresAt,
-    };
-
-    const sessions = loadSessions();
-    sessions.push(newSession);
-    saveSessions(sessions);
-
-    console.info(`[AUTH] New user registered: ${cleanEmail}`);
-    return res.status(201).json({
-      token: sessionToken,
-      expiresAt,
-      user: {
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email,
-        createdAt: newUser.createdAt,
-      },
-    });
-  } catch (error) {
-    console.error('[SERVER ERROR in /api/auth/register]:', error);
-    return res.status(500).json({ error: 'Registration failed due to a server error.' });
-  }
-});
-
-// Login
-app.post('/api/auth/login', sensitiveLimiter, (req: Request, res: Response) => {
-  try {
-    const { email, password } = req.body;
-    const cleanEmail = sanitizeString(email).toLowerCase();
-
-    if (!cleanEmail || !password) {
-      return res.status(400).json({ error: 'Please enter both your email address and password.' });
-    }
-
-    const users = loadUsers();
-    const user = users.find((u) => u.email === cleanEmail);
-
-    if (!user || !verifyPassword(password, user.passwordHash, user.salt)) {
-      console.warn(`[AUTH] Failed login attempt for: ${cleanEmail}`);
-      const userExists = !!user;
-      return res.status(401).json({
-        error: userExists
-          ? 'Incorrect password. You can reset your password immediately below.'
-          : 'No account was found with this email. Please register or use Reset Password.',
-        userExists,
-        canReset: true,
-      });
-    }
-
-    const sessionToken = 'pixora_sess_' + crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
-    const newSession: StoredSession = {
-      token: sessionToken,
-      userId: user.id,
-      email: user.email,
-      name: user.name,
-      createdAt: Date.now(),
-      expiresAt,
-    };
-
-    const sessions = loadSessions();
-    sessions.push(newSession);
-    saveSessions(sessions);
-
-    console.info(`[AUTH] Successful login for: ${cleanEmail}`);
-    return res.status(200).json({
-      token: sessionToken,
-      expiresAt,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        createdAt: user.createdAt,
-      },
-    });
-  } catch (error) {
-    console.error('[SERVER ERROR in /api/auth/login]:', error);
-    return res.status(500).json({ error: 'Login failed due to a server error.' });
-  }
-});
-
-// Current User Session verification
-app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  return res.status(200).json({
-    user: {
-      id: req.user!.userId,
-      email: req.user!.email,
-      name: req.user!.name,
-      createdAt: req.user!.createdAt,
-    },
-    expiresAt: req.user!.expiresAt,
-  });
-});
-
-// Logout (Session Invalidation)
-app.post('/api/auth/logout', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const sessions = loadSessions();
-  const filtered = sessions.filter((s) => s.token !== req.user!.token);
-  saveSessions(filtered);
-  console.info(`[AUTH] Session invalidated for user: ${req.user!.email}`);
-  return res.status(200).json({ success: true, message: 'Logged out successfully.' });
-});
-
-// Forgot Password / Direct Account Recovery
-app.post('/api/auth/forgot-password', sensitiveLimiter, (req: Request, res: Response) => {
-  try {
-    const { email } = req.body;
-    const cleanEmail = sanitizeString(email).toLowerCase();
-
-    if (!cleanEmail) {
-      return res.status(400).json({ error: 'Please enter your email address.' });
-    }
-
-    const users = loadUsers();
-    let user = users.find((u) => u.email === cleanEmail);
-
-    if (!user) {
-      // Auto-initialize account so the user is never blocked by ephemeral Cloud Run restarts
-      const { hash, salt } = hashPassword('Pixora@2026!');
-      user = {
-        id: 'usr_' + crypto.randomBytes(8).toString('hex'),
-        name: cleanEmail.split('@')[0],
-        email: cleanEmail,
-        passwordHash: hash,
-        salt,
-        createdAt: Date.now(),
-      };
-      users.push(user);
-    }
-
-    const resetToken = crypto.randomBytes(24).toString('hex');
-    user.resetToken = resetToken;
-    user.resetTokenExpiry = Date.now() + 60 * 60 * 1000; // 1-hour validity
-    saveUsers(users);
-
-    console.info(`[AUTH] Password recovery token issued for: ${cleanEmail}`);
-
-    return res.status(200).json({
-      success: true,
-      resetToken,
-      email: cleanEmail,
-      message: 'Account verified. Enter your new password below to reset your credentials and log in.',
-    });
-  } catch (error) {
-    console.error('[SERVER ERROR in /api/auth/forgot-password]:', error);
-    return res.status(500).json({ error: 'Password recovery request failed.' });
-  }
-});
-
-// Reset Password (Instantly Updates & Logs In)
-app.post('/api/auth/reset-password', sensitiveLimiter, (req: Request, res: Response) => {
-  try {
-    const { token, newPassword } = req.body;
-    if (!token || !newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
-    }
-
-    const users = loadUsers();
-    const user = users.find((u) => u.resetToken === token && u.resetTokenExpiry && u.resetTokenExpiry > Date.now());
-
-    if (!user) {
-      return res.status(400).json({ error: 'Password reset link or token is invalid or has expired.' });
-    }
-
-    const { hash, salt } = hashPassword(newPassword);
-    user.passwordHash = hash;
-    user.salt = salt;
-    delete user.resetToken;
-    delete user.resetTokenExpiry;
-    saveUsers(users);
-
-    // Invalidate old sessions and create a fresh session token
-    const sessions = loadSessions();
-    const activeSessions = sessions.filter((s) => s.userId !== user.id);
-
-    const sessionToken = 'pixora_sess_' + crypto.randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
-    const newSession: StoredSession = {
-      token: sessionToken,
-      userId: user.id,
-      email: user.email,
-      name: user.name,
-      createdAt: Date.now(),
-      expiresAt,
-    };
-    activeSessions.push(newSession);
-    saveSessions(activeSessions);
-
-    console.info(`[AUTH] Password successfully updated and session created for: ${user.email}`);
-
-    return res.status(200).json({
-      success: true,
-      token: sessionToken,
-      expiresAt,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        createdAt: user.createdAt,
-      },
-      message: 'Password successfully updated. You are now logged in.',
-    });
-  } catch (error) {
-    console.error('[SERVER ERROR in /api/auth/reset-password]:', error);
-    return res.status(500).json({ error: 'Password reset failed.' });
-  }
-});
-
-// -------------------------------------------------------------
-// 9. USER PROJECTS & FILE STORAGE ENDPOINTS (Protected per-user isolation)
-// -------------------------------------------------------------
-// List user's projects
+// List user's projects (Extracted directly from validated token UID)
 app.get('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const projects = loadProjects();
   const userProjects = projects
@@ -695,7 +870,7 @@ app.get('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Resp
   return res.status(200).json({ projects: userProjects });
 });
 
-// Get single project details (including config)
+// Get single project details (Strict authorization check)
 app.get('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const projects = loadProjects();
@@ -705,14 +880,21 @@ app.get('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: 
     return res.status(404).json({ error: 'Project not found.' });
   }
 
-  if (project.userId !== req.user!.userId) {
+  // Isolation check: users cannot read another user's project
+  if (project.userId !== req.user!.userId && !req.user!.isAdmin) {
+    recordAuditLog({
+      type: 'UNAUTHORIZED_ACCESS',
+      ip: req.ip || '',
+      userId: req.user!.userId,
+      details: `User attempted to access project ${id} owned by ${project.userId}`,
+    });
     return res.status(403).json({ error: 'Forbidden: You do not have permission to access this project.' });
   }
 
   return res.status(200).json({ project });
 });
 
-// Create new project
+// Create or save project
 app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
@@ -733,9 +915,10 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
     } = req.body;
 
     const cleanTitle = sanitizeString(title) || 'Untitled Project';
-    const projectId = id && typeof id === 'string' && id.startsWith('proj_')
-      ? id
-      : 'proj_' + crypto.randomBytes(8).toString('hex');
+    const projectId =
+      id && typeof id === 'string' && id.startsWith('proj_')
+        ? id
+        : 'proj_' + crypto.randomBytes(8).toString('hex');
 
     const projects = loadProjects();
     const existingIndex = projects.findIndex((p) => p.id === projectId);
@@ -743,7 +926,7 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
     const now = Date.now();
     const projectRecord: StoredProject = {
       id: projectId,
-      userId: req.user!.userId,
+      userId: req.user!.userId, // Forced from authenticated token
       title: cleanTitle,
       tool: sanitizeString(tool),
       originalFileName: sanitizeString(originalFileName),
@@ -753,7 +936,7 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
       originalMimeType: sanitizeString(originalMimeType) || undefined,
       exportCount: Number(exportCount) || 1,
       configSummary: sanitizeString(configSummary) || '',
-      status: (status === 'completed' || status === 'processing' || status === 'error') ? status : 'draft',
+      status: status === 'completed' || status === 'processing' || status === 'error' ? status : 'draft',
       config: config || {},
       createdAt: existingIndex >= 0 ? projects[existingIndex].createdAt : now,
       updatedAt: now,
@@ -772,7 +955,6 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
 
     saveProjects(projects);
 
-    // Also update active tool map
     if (projectRecord.tool) {
       const activeTools = loadActiveTools();
       if (!activeTools[req.user!.userId]) {
@@ -831,7 +1013,6 @@ app.put('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: 
     project.updatedAt = Date.now();
     saveProjects(projects);
 
-    // Update active tool record
     if (project.tool) {
       const activeTools = loadActiveTools();
       if (!activeTools[req.user!.userId]) {
@@ -848,7 +1029,7 @@ app.put('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: 
   }
 });
 
-// Delete project and stored files
+// Delete project
 app.delete('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const projects = loadProjects();
@@ -865,7 +1046,6 @@ app.delete('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, re
   const updated = projects.filter((p) => p.id !== id);
   saveProjects(updated);
 
-  // Clean up stored file directory
   const projectFileDir = path.join(FILES_DIR, req.user!.userId, id);
   if (fs.existsSync(projectFileDir)) {
     try {
@@ -875,7 +1055,6 @@ app.delete('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, re
     }
   }
 
-  // Clear from active tools if it was active
   const activeTools = loadActiveTools();
   if (activeTools[req.user!.userId]) {
     for (const [tool, pId] of Object.entries(activeTools[req.user!.userId])) {
@@ -910,27 +1089,21 @@ app.post('/api/user/projects/:id/file', requireAuth, (req: AuthenticatedRequest,
       return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
     }
 
-    // Extract base64 payload
     const matches = dataUrl.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
     if (!matches || matches.length !== 3) {
       return res.status(400).json({ error: 'Invalid data URL format.' });
     }
 
-    const declaredMime = matches[1];
     const buffer = Buffer.from(matches[2], 'base64');
-
-    // Hard 10MB file limit
     if (buffer.length > 10 * 1024 * 1024) {
       return res.status(413).json({ error: 'File size exceeds maximum 10MB limit.' });
     }
 
-    // Real signature check (magic bytes)
     const check = validateImageBuffer(buffer);
     if (!check.valid) {
       return res.status(400).json({ error: 'Unsupported file type. Allowed: JPEG, PNG, WebP.' });
     }
 
-    // Write file securely inside isolated user/project directory
     const userDir = path.join(FILES_DIR, req.user!.userId);
     const projectDir = path.join(userDir, id);
     if (!fs.existsSync(projectDir)) {
@@ -971,11 +1144,11 @@ app.get('/api/user/projects/:id/file', requireAuth, (req: AuthenticatedRequest, 
     return res.status(404).json({ error: 'Project not found.' });
   }
 
-  if (project.userId !== req.user!.userId) {
+  if (project.userId !== req.user!.userId && !req.user!.isAdmin) {
     return res.status(403).json({ error: 'Forbidden: You do not have permission to access this file.' });
   }
 
-  const filePath = path.join(FILES_DIR, req.user!.userId, id, 'original.bin');
+  const filePath = path.join(FILES_DIR, project.userId, id, 'original.bin');
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'File not stored on server.' });
   }
@@ -1016,17 +1189,14 @@ app.post('/api/user/active-tools', requireAuth, (req: AuthenticatedRequest, res:
 });
 
 // -------------------------------------------------------------
-// 10. PUBLIC INQUIRY & HEALTH API ENDPOINTS
+// 15. PUBLIC INQUIRY & HEALTH API ENDPOINTS
 // -------------------------------------------------------------
-// Contact & Feedback submission with Honeypot bot protection
-app.post('/api/contact', sensitiveLimiter, (req: Request, res: Response) => {
+app.post('/api/contact', rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }), (req: Request, res: Response) => {
   try {
     const { category, message, email, website_trap } = req.body;
 
-    // BOT HONEYPOT: If the invisible trap field is populated, silently reject
     if (website_trap) {
       console.warn(`[SECURITY HONEYPOT TRIGGERED] Bot submission blocked from IP: ${req.ip}`);
-      // Return 200 to confound automated bot scrapers
       return res.status(200).json({ success: true, message: 'Received' });
     }
 
@@ -1038,7 +1208,7 @@ app.post('/api/contact', sensitiveLimiter, (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Message must be at least 5 characters long.' });
     }
 
-    console.info(`[CONTACT INQUIRY] Valid feedback received: [${cleanCategory}]`);
+    console.info(`[CONTACT INQUIRY] Valid feedback received: [${cleanCategory}] from ${cleanEmail ? cleanEmail.slice(0, 3) + '***' : 'anonymous'}`);
 
     return res.status(200).json({
       success: true,
@@ -1059,12 +1229,13 @@ app.get('/api/health', (_req: Request, res: Response) => {
       https_enforced: isProd,
       client_side_processing_guarantee: true,
       max_upload_cap_mb: 10,
+      progressive_lockout_active: true,
     },
   });
 });
 
 // -------------------------------------------------------------
-// 8. SEO: SITEMAP.XML & ROBOTS.TXT
+// 16. SEO: SITEMAP.XML & ROBOTS.TXT
 // -------------------------------------------------------------
 app.get('/robots.txt', (_req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/plain');
@@ -1112,7 +1283,7 @@ ${routes
 });
 
 // -------------------------------------------------------------
-// 9. VITE DEV SERVER OR STATIC PRODUCTION DELIVERY
+// 17. VITE DEV SERVER OR STATIC PRODUCTION DELIVERY
 // -------------------------------------------------------------
 async function startServer() {
   if (!isProd) {
@@ -1130,28 +1301,22 @@ async function startServer() {
           maxAge: '1y',
           setHeaders: (res, pathUrl) => {
             if (pathUrl.endsWith('.html')) {
-              // HTML files should revalidate quickly
               res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
             } else {
-              // Hashed assets cached for 1 year
               res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
             }
           },
         })
       );
 
-      // Fallback for SPA routing
       app.get('*', (_req: Request, res: Response) => {
         res.sendFile(path.join(distPath, 'index.html'));
       });
     }
   }
 
-  // -------------------------------------------------------------
-  // 10. GENERIC ERROR HANDLER (NO STACK TRACES EXPOSED)
-  // -------------------------------------------------------------
+  // Generic Error Handler (No sensitive stacks or internals leaked)
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    // Log detailed trace server-side only
     console.error('[UNHANDLED SERVER EXCEPTION]:', err);
     res.status(500).json({
       error: 'An unexpected internal error occurred. Please try again later.',

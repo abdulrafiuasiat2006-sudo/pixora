@@ -1,0 +1,66 @@
+[
+  {
+    "id": "aud_ed71d3e1c4c0a1f8",
+    "timestamp": 1793654308278,
+    "type": "LOGIN_SUCCESS",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Successful authentication. Cleared 6 prior failed attempts."
+  },
+  {
+    "id": "aud_364c60c7631cb947",
+    "timestamp": 1793654308270,
+    "type": "ACCOUNT_LOCKED",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Account progressive lockout triggered: 6 failed attempts. Locked for 300 seconds."
+  },
+  {
+    "id": "aud_e6476e178c7c51f0",
+    "timestamp": 1793654308266,
+    "type": "ACCOUNT_LOCKED",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Account progressive lockout triggered: 5 failed attempts. Locked for 120 seconds."
+  },
+  {
+    "id": "aud_5002caa26949fd82",
+    "timestamp": 1793654308261,
+    "type": "ACCOUNT_LOCKED",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Account progressive lockout triggered: 4 failed attempts. Locked for 120 seconds."
+  },
+  {
+    "id": "aud_8b6bf0291d0ac8ea",
+    "timestamp": 1793654308253,
+    "type": "LOCKOUT_CHECK",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Lockout pre-check active: account locked for 120s remaining (3 prior failures)"
+  },
+  {
+    "id": "aud_88954d9d066f538d",
+    "timestamp": 1793654308241,
+    "type": "ACCOUNT_LOCKED",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Account progressive lockout triggered: 3 failed attempts. Locked for 120 seconds."
+  },
+  {
+    "id": "aud_6863d06b8a2e982d",
+    "timestamp": 1793654308235,
+    "type": "LOGIN_FAILURE",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Failed authentication attempt #2. Not yet locked (threshold is 3)."
+  },
+  {
+    "id": "aud_1552d6e75ee163b1",
+    "timestamp": 1793654308229,
+    "type": "LOGIN_FAILURE",
+    "ip": "127.0.0.1",
+    "emailHash": "3a52ba135d432a5a",
+    "details": "Failed authentication attempt #1. Not yet locked (threshold is 3)."
+  }
+]

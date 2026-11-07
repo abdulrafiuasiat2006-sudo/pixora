@@ -21,9 +21,9 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ onNaviga
 
   const [email, setEmail] = useState(() => {
     try {
-      return localStorage.getItem('pixora_last_login_email') || 'abdulrafiuasiat2006@gmail.com';
+      return localStorage.getItem('pixora_last_login_email') || '';
     } catch {
-      return 'abdulrafiuasiat2006@gmail.com';
+      return '';
     }
   });
 

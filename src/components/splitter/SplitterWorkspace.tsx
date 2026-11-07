@@ -25,8 +25,14 @@ import {
   AlertCircle,
   Eye,
   Sliders,
-  BookmarkPlus,
-  Share2,
+  Rows,
+  Columns,
+  GalleryHorizontal,
+  ChevronLeft,
+  ChevronRight,
+  Maximize2,
+  CheckCircle2,
+  ShieldCheck,
 } from 'lucide-react';
 import { ProjectWorkspaceBar } from '../common/ProjectWorkspaceBar';
 import { ProjectPersistenceService } from '../../services/projectPersistenceService';
@@ -76,7 +82,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
   const [isZipping, setIsZipping] = useState(false);
   const [selectedTilePreview, setSelectedTilePreview] = useState<SplitTile | null>(null);
   const [showInstagramOrder, setShowInstagramOrder] = useState(false);
-  const [savedSuccessNotice, setSavedSuccessNotice] = useState(false);
+  const [previewView, setPreviewView] = useState<'assembled' | 'tiles' | 'carousel'>('assembled');
+  const [carouselActiveSlide, setCarouselActiveSlide] = useState(0);
 
   const applyLoadedProject = (proj: FullWorkspaceProject) => {
     setCurrentProject(proj);
@@ -148,48 +155,33 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                   setCurrentProject(s);
                   setSaveStatus('saved');
                   setLastSavedAt(Date.now());
-                  onClearLaunch?.();
                 }
               })
-              .catch(() => {});
+              .catch(() => {
+                if (!isCancelled) setSaveStatus('error');
+              });
           }
         } else {
-          // Restore active project for this user in Splitter
-          const active = await ProjectPersistenceService.getActiveProject(userId, 'splitter');
-          if (active && active.status !== 'completed' && active.originalDataUrl && !isCancelled) {
-            applyLoadedProject(active);
-          } else if (!isCancelled) {
-            setCurrentProject(null);
-            setImageState(null);
+          const activeProj = await ProjectPersistenceService.getActiveProject(userId, 'splitter');
+          if (activeProj && !isCancelled) {
+            applyLoadedProject(activeProj);
           }
         }
       } catch (err) {
-        console.error('Failed to restore splitter project:', err);
+        console.warn('Failed restoring splitter project:', err);
       } finally {
-        if (!isCancelled) setIsLoadingProject(false);
+        if (!isCancelled) {
+          setIsLoadingProject(false);
+        }
       }
     };
 
     restoreWorkspace();
+
     return () => {
       isCancelled = true;
     };
-  }, [userId, initialProjectId]);
-
-  // Handle external launch with initialImage after mount
-  useEffect(() => {
-    if (initialImage && initialImage !== imageState) {
-      handleImageLoaded(initialImage);
-      onClearLaunch?.();
-    }
-  }, [initialImage]);
-
-  // Handle external project selection after mount
-  useEffect(() => {
-    if (initialProjectId && initialProjectId !== currentProject?.id) {
-      handleSelectProject(initialProjectId);
-    }
-  }, [initialProjectId]);
+  }, [initialProjectId, userId]);
 
   // When imageState changes, load the HTMLImageElement
   useEffect(() => {
@@ -231,6 +223,11 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     };
   }, [loadedImgElement, config]);
 
+  // Reset carousel active slide when slide count changes
+  useEffect(() => {
+    setCarouselActiveSlide(0);
+  }, [config.carouselSlideCount, config.mode]);
+
   // Debounced auto-save when config, tiles, or project changes
   useEffect(() => {
     if (!currentProject || !imageState) return;
@@ -240,8 +237,12 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
       try {
         const configSummary =
           config.mode === 'carousel'
-            ? `${config.cols}-Slide Carousel (${config.format.split('/')[1]?.toUpperCase()} @ ${config.quality}%)`
-            : `${config.rows}×${config.cols} Grid Split (${tiles.length} tiles)`;
+            ? `${config.carouselSlideCount || config.cols}-Slide Seamless Carousel (${config.format.split('/')[1]?.toUpperCase()} @ ${config.quality}%)`
+            : config.mode === 'rows'
+            ? `${config.rows} Horizontal Rows (${config.format.split('/')[1]?.toUpperCase()} @ ${config.quality}%)`
+            : config.mode === 'columns'
+            ? `${config.cols} Vertical Columns (${config.format.split('/')[1]?.toUpperCase()} @ ${config.quality}%)`
+            : `${config.rows}×${config.cols} Profile Grid (${tiles.length} tiles)`;
 
         const updated: FullWorkspaceProject = {
           ...currentProject,
@@ -388,10 +389,19 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     if (tiles.length === 0) return;
     setIsZipping(true);
     try {
-      const postingGuide =
-        config.mode === 'grid' && config.rows === 3 && config.cols === 3
-          ? 'INSTAGRAM POSTING TIP: Post in reverse order (Tile 09 first, Tile 01 last) to assemble the full image on your profile grid.'
-          : 'TILES ORDER: Tiles are named sequentially row by row, left to right.';
+      let postingGuide = 'PIXORA SPLIT ARCHIVE\n====================\n';
+      if (config.mode === 'grid' && config.rows === 3 && config.cols === 3) {
+        postingGuide += 'INSTAGRAM 3x3 PROFILE GRID GUIDE:\nPost in reverse sequence (Tile 09 first, Tile 01 last) to assemble the full photo on your profile grid.\n';
+      } else if (config.mode === 'rows') {
+        postingGuide += 'HORIZONTAL ROWS:\nNumbered top to bottom (Row 01 is top section, subsequent files are next lower sections).\n';
+      } else if (config.mode === 'columns') {
+        postingGuide += 'VERTICAL COLUMNS:\nNumbered left to right (Col 01 is leftmost section, subsequent files are sections to the right).\n';
+      } else if (config.mode === 'carousel') {
+        postingGuide += 'SEAMLESS CAROUSEL:\nNumbered left to right (Slide 01 first, Slide 02 second, etc.) for a continuous panoramic swipe experience.\n';
+      } else {
+        postingGuide += 'TILES ORDER:\nTiles are sequenced row-by-row, left-to-right.\n';
+      }
+      postingGuide += `Total Slices: ${tiles.length}\nOriginal Image: ${imageState?.width} x ${imageState?.height} px\nPreservation: 100% original aspect ratio & pixel fidelity without stretching or cropping.`;
 
       const zipBlob = await createZipArchive(
         tiles,
@@ -424,14 +434,59 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     }
   };
 
-  const gridPresets = [
-    { label: '3×3 Giant Grid (IG)', rows: 3, cols: 3, mode: 'grid' as SplitMode },
-    { label: '3×1 Wide Panorama', rows: 1, cols: 3, mode: 'grid' as SplitMode },
-    { label: '3×2 Banner (IG)', rows: 2, cols: 3, mode: 'grid' as SplitMode },
-    { label: '2×2 Square Quad', rows: 2, cols: 2, mode: 'grid' as SplitMode },
-    { label: '3-Slide Carousel', rows: 1, cols: 3, mode: 'carousel' as SplitMode },
-    { label: '5-Slide Carousel', rows: 1, cols: 5, mode: 'carousel' as SplitMode },
-  ];
+  // Change mode helper with smart prefix & dimensions defaults
+  const handleSelectMode = (newMode: SplitMode) => {
+    let newRows = config.rows;
+    let newCols = config.cols;
+    let newSlideCount = config.carouselSlideCount;
+    let newPrefix = 'pixora-tile';
+
+    if (newMode === 'grid') {
+      newRows = config.rows > 1 ? config.rows : 3;
+      newCols = config.cols > 1 ? config.cols : 3;
+      newPrefix = 'pixora-grid';
+    } else if (newMode === 'rows') {
+      newRows = config.rows > 1 ? config.rows : 3;
+      newCols = 1;
+      newPrefix = 'pixora-row';
+    } else if (newMode === 'columns') {
+      newRows = 1;
+      newCols = config.cols > 1 ? config.cols : 3;
+      newPrefix = 'pixora-col';
+    } else if (newMode === 'carousel') {
+      newRows = 1;
+      newCols = newSlideCount || 3;
+      newSlideCount = newSlideCount >= 2 ? newSlideCount : 3;
+      newPrefix = 'pixora-slide';
+    }
+
+    setConfig({
+      ...config,
+      mode: newMode,
+      rows: newRows,
+      cols: newCols,
+      carouselSlideCount: newSlideCount,
+      fileNamePrefix: newPrefix,
+    });
+  };
+
+  const activeCols =
+    config.mode === 'rows'
+      ? 1
+      : config.mode === 'columns'
+      ? config.cols
+      : config.mode === 'carousel'
+      ? config.carouselSlideCount
+      : config.cols;
+
+  const activeRows =
+    config.mode === 'rows'
+      ? config.rows
+      : config.mode === 'columns'
+      ? 1
+      : config.mode === 'carousel'
+      ? 1
+      : config.rows;
 
   if (isLoadingProject) {
     return (
@@ -462,38 +517,68 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-bold tracking-tight text-[#171717]">Image Splitter & Tile Exporter</h1>
           <p className="mt-1 text-sm text-[#171717]/70">
-            Divide photos into seamless multi-tile profile grids or swipeable panorama carousels.
+            Split photos into Profile Grids, Horizontal Rows, Vertical Columns, or Seamless Carousels with 100% original proportion preservation.
           </p>
         </div>
 
         <ImageDropzone
           onImageLoaded={handleImageLoaded}
           title="Upload image to split"
-          subtitle="Works with any resolution. Exact pixel distribution ensures zero seam gaps."
+          subtitle="Works with portraits, landscapes, and squares. Zero stretching, squashing, or accidental cropping."
         />
 
-        {/* Quick presets guide */}
+        {/* 4 Tool Engines Overview */}
         <div className="mt-8 border-t border-[#171717]/10 pt-6">
-          <div className="text-xs font-semibold uppercase tracking-wider text-[#171717]/60 mb-3 text-center">
-            Popular Split Presets Available
+          <div className="text-xs font-semibold uppercase tracking-wider text-[#171717]/60 mb-4 text-center">
+            4 Dedicated Splitting Tools Included
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {gridPresets.map((p, idx) => (
-              <div
-                key={idx}
-                className="p-3 bg-white/60 border border-[#171717]/10 rounded-lg text-left"
-              >
-                <div className="font-semibold text-xs text-[#171717]">{p.label}</div>
-                <div className="text-[11px] text-[#171717]/60 mt-0.5">
-                  {p.mode === 'carousel' ? `${p.cols} contiguous swipe slides` : `${p.rows * p.cols} tiles (${p.cols} cols × ${p.rows} rows)`}
-                </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-3.5 bg-white border border-[#171717]/10 rounded-xl text-left shadow-2xs">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Grid className="w-4 h-4 text-[#FF6B35]" />
+                <span className="font-bold text-xs text-[#171717]">Profile Grid</span>
               </div>
-            ))}
+              <p className="text-[11px] text-[#171717]/70 leading-relaxed">
+                3×3, 2×2, 3×4, 1×3 or custom Rows × Cols. Divides photo into equal grid tiles that reconstruct the image perfectly.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-white border border-[#171717]/10 rounded-xl text-left shadow-2xs">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Rows className="w-4 h-4 text-[#FF6B35]" />
+                <span className="font-bold text-xs text-[#171717]">Horizontal Rows</span>
+              </div>
+              <p className="text-[11px] text-[#171717]/70 leading-relaxed">
+                Divide an image into 2, 3, 4, 5+ horizontal sections from top to bottom while maintaining full width.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-white border border-[#171717]/10 rounded-xl text-left shadow-2xs">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Columns className="w-4 h-4 text-[#FF6B35]" />
+                <span className="font-bold text-xs text-[#171717]">Vertical Columns</span>
+              </div>
+              <p className="text-[11px] text-[#171717]/70 leading-relaxed">
+                Divide an image into 2, 3, 4, 5+ vertical sections from left to right while maintaining full height.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-white border border-[#171717]/10 rounded-xl text-left shadow-2xs">
+              <div className="flex items-center gap-2 mb-1.5">
+                <GalleryHorizontal className="w-4 h-4 text-[#FF6B35]" />
+                <span className="font-bold text-xs text-[#171717]">Seamless Carousel</span>
+              </div>
+              <p className="text-[11px] text-[#171717]/70 leading-relaxed">
+                Divide panoramic or landscape photos into swipeable contiguous slides with zero seam gaps.
+              </p>
+            </div>
           </div>
         </div>
       </div>
     );
   }
+
+  const imageAspectRatio = imageState.width / imageState.height;
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -518,16 +603,30 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
             <span>Tools</span>
             <span>/</span>
             <span className="text-[#171717] font-medium">Image Splitter</span>
+            <span>/</span>
+            <span className="text-[#FF6B35] font-semibold uppercase">
+              {config.mode === 'grid'
+                ? 'Profile Grid'
+                : config.mode === 'rows'
+                ? 'Rows Splitter'
+                : config.mode === 'columns'
+                ? 'Columns Splitter'
+                : 'Seamless Carousel'}
+            </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold text-[#171717] mt-0.5">
             {imageState.name}
           </h1>
-          <div className="flex items-center gap-2 text-xs text-[#171717]/70 mt-1 font-mono">
-            <span>{imageState.width} × {imageState.height} px</span>
+          <div className="flex items-center gap-2 text-xs text-[#171717]/70 mt-1 font-mono flex-wrap">
+            <span className="font-semibold text-[#171717]">{imageState.width} × {imageState.height} px</span>
+            <span>·</span>
+            <span>Ratio: {imageAspectRatio.toFixed(2)}:1</span>
             <span>·</span>
             <span>{formatBytes(imageState.size)}</span>
             <span>·</span>
-            <span>{imageState.type.split('/')[1]?.toUpperCase()}</span>
+            <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded text-[10px] font-bold">
+              Original Proportions Preserved
+            </span>
           </div>
         </div>
 
@@ -542,7 +641,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
             ) : (
               <Archive className="w-3.5 h-3.5" />
             )}
-            <span>Export ZIP ({tiles.length} Tiles)</span>
+            <span>Export ZIP ({tiles.length} {tiles.length === 1 ? 'Slice' : 'Slices'})</span>
           </button>
 
           <button
@@ -557,26 +656,68 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
-        {/* LEFT / MAIN COLUMN: TILES PREVIEW GRID */}
+        {/* LEFT / MAIN COLUMN: PREVIEW WORKSPACE */}
         <div className="lg:col-span-8 flex flex-col gap-4">
           <div className="bg-white/80 border border-[#171717]/10 rounded-xl p-3.5 sm:p-6 shadow-xs">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-[#171717]/10 mb-4 gap-2.5">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-xs font-semibold uppercase tracking-wider text-[#171717]">
-                  {config.mode === 'carousel' ? 'Carousel Slide Preview' : 'Interactive Tile Grid'}
-                </span>
-                <span className="text-xs text-[#171717]/50 font-mono">
-                  ({tiles.length} {tiles.length === 1 ? 'tile' : 'tiles'}
+            {/* PREVIEW TOOLBAR */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3.5 border-b border-[#171717]/10 mb-4 gap-3">
+              <div className="flex items-center gap-2">
+                {/* Preview View Selector Tabs */}
+                <div className="inline-flex p-1 bg-[#171717]/5 rounded-lg text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewView('assembled')}
+                    className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      previewView === 'assembled'
+                        ? 'bg-white text-[#171717] font-semibold shadow-xs'
+                        : 'text-[#171717]/70 hover:text-[#171717]'
+                    }`}
+                  >
+                    <Layers className="w-3.5 h-3.5 text-[#FF6B35]" />
+                    <span>Assembled View</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPreviewView('tiles')}
+                    className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      previewView === 'tiles'
+                        ? 'bg-white text-[#171717] font-semibold shadow-xs'
+                        : 'text-[#171717]/70 hover:text-[#171717]'
+                    }`}
+                  >
+                    <Grid className="w-3.5 h-3.5 text-[#FF6B35]" />
+                    <span>Separated Slices</span>
+                  </button>
+
+                  {config.mode === 'carousel' && (
+                    <button
+                      type="button"
+                      onClick={() => setPreviewView('carousel')}
+                      className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        previewView === 'carousel'
+                          ? 'bg-white text-[#171717] font-semibold shadow-xs'
+                          : 'text-[#171717]/70 hover:text-[#171717]'
+                      }`}
+                    >
+                      <GalleryHorizontal className="w-3.5 h-3.5 text-[#FF6B35]" />
+                      <span>Swipe Simulator</span>
+                    </button>
+                  )}
+                </div>
+
+                <span className="text-xs text-[#171717]/50 font-mono hidden md:inline">
+                  ({tiles.length} {tiles.length === 1 ? 'slice' : 'slices'}
                   {downloadedTileIndices.size > 0 && ` · ${downloadedTileIndices.size}/${tiles.length} saved`})
                 </span>
               </div>
 
-              {/* Instagram reverse order guide toggle */}
+              {/* Instagram reverse order guide toggle for 3x3 */}
               {config.rows === 3 && config.cols === 3 && config.mode === 'grid' && (
                 <button
                   type="button"
                   onClick={() => setShowInstagramOrder(!showInstagramOrder)}
-                  className={`text-xs px-3 py-1.5 min-h-[38px] rounded-lg transition-colors font-medium border cursor-pointer active:scale-95 ${
+                  className={`text-xs px-3 py-1.5 min-h-[36px] rounded-lg transition-colors font-medium border cursor-pointer active:scale-95 ${
                     showInstagramOrder
                       ? 'bg-[#171717] text-white border-[#171717]'
                       : 'bg-white text-[#171717]/75 border-[#171717]/20 hover:text-[#171717]'
@@ -592,154 +733,424 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                 <span className="w-6 h-6 border-2 border-[#FF6B35] border-t-transparent rounded-full animate-spin" />
                 <span className="text-xs font-mono">Computing seamless pixel slices...</span>
               </div>
-            ) : config.mode === 'carousel' ? (
-              /* Carousel mode: Touch-friendly horizontal swipe track on mobile, clean row on desktop */
-              <div className="w-full">
-                <div className="flex gap-3 overflow-x-auto pb-4 pt-1 px-0.5 scrollbar-thin snap-x snap-mandatory">
-                  {tiles.map((tile) => (
-                    <div
-                      key={tile.id}
-                      onClick={() => setSelectedTilePreview(tile)}
-                      className="group relative bg-[#171717]/5 border border-[#171717]/15 rounded-xl overflow-hidden flex flex-col transition-all hover:border-[#FF6B35] cursor-pointer snap-center shrink-0 w-[68vw] xs:w-[50vw] sm:w-[38vw] md:w-56 shadow-2xs"
-                    >
-                      <div className="relative aspect-square w-full bg-[#171717]/10 flex items-center justify-center overflow-hidden">
-                        <img
-                          src={tile.dataUrl}
-                          alt={tile.fileName}
-                          className="w-full h-full object-cover pointer-events-none"
-                          referrerPolicy="no-referrer"
-                        />
+            ) : previewView === 'assembled' ? (
+              /* VIEW 1: ASSEMBLED FULL RECONSTRUCTION VIEW
+                 Shows the original image in its exact aspect ratio, overlaid with high-precision cut lines
+                 Zero distortion. Zero squashing. Zero cropping. */
+              <div className="w-full flex flex-col items-center">
+                <div
+                  className="relative w-full max-w-full rounded-xl overflow-hidden border border-[#171717]/20 shadow-xs bg-[#171717]/5"
+                  style={{
+                    aspectRatio: `${imageState.width} / ${imageState.height}`,
+                    maxHeight: '70vh',
+                  }}
+                >
+                  {/* Base: Authentic original source image */}
+                  <img
+                    src={imageState.dataUrl}
+                    alt="Original Assembled Preview"
+                    className="w-full h-full object-contain pointer-events-none select-none block"
+                  />
 
-                        {/* Slide Indicator */}
-                        <div className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-[#171717]/80 text-[#F7F5F0] text-[11px] font-mono shadow-xs backdrop-blur-xs">
-                          Slide #{tile.index}
-                        </div>
+                  {/* Cut Lines & Interactive Tiles Overlay */}
+                  <div
+                    className="absolute inset-0 grid pointer-events-auto"
+                    style={{
+                      gridTemplateColumns: `repeat(${activeCols}, minmax(0, 1fr))`,
+                      gridTemplateRows: `repeat(${activeRows}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {tiles.map((tile) => {
+                      const igOrderNumber =
+                        config.rows === 3 && config.cols === 3 ? 10 - tile.index : tile.index;
 
-                        {/* Tile Downloaded Badge */}
-                        {downloadedTileIndices.has(tile.index) && (
-                          <div className="absolute top-2 right-2 z-10 px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold flex items-center gap-1 shadow-xs">
-                            <Check className="w-3 h-3" />
-                            <span>Saved</span>
-                          </div>
-                        )}
-
-                        {/* Quick Action Overlay */}
-                        <div className="absolute inset-0 bg-[#171717]/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-2">
-                          <span className="px-2.5 py-1 text-xs font-semibold text-[#171717] bg-white rounded-md shadow-xs">
-                            Tap to inspect
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Tile meta info footer */}
-                      <div className="p-2.5 text-[11px] bg-white border-t border-[#171717]/10 flex items-center justify-between text-[#171717]/70 font-mono">
-                        <span>{tile.width}×{tile.height}</span>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDownloadSingleTile(tile);
-                          }}
-                          className="p-1 text-[#FF6B35] hover:bg-[#FF6B35]/10 rounded font-semibold flex items-center gap-1"
-                          title="Download slide"
+                      return (
+                        <div
+                          key={tile.id}
+                          onClick={() => setSelectedTilePreview(tile)}
+                          className="relative border border-dashed border-[#FF6B35]/70 hover:bg-[#FF6B35]/15 transition-all cursor-pointer group flex flex-col justify-between p-1.5 sm:p-2"
+                          title={`Click to inspect Tile #${tile.index} (${tile.width} × ${tile.height} px)`}
                         >
-                          <Download className="w-3 h-3" />
-                          <span>Save</span>
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                          {/* Sequential Indicator Badge */}
+                          <div className="flex items-center gap-1">
+                            <span className="px-1.5 py-0.5 rounded bg-[#171717]/85 text-[#F7F5F0] text-[10px] sm:text-xs font-mono font-bold shadow-xs">
+                              {showInstagramOrder ? `Post #${igOrderNumber}` : `#${tile.index}`}
+                            </span>
+                            {downloadedTileIndices.has(tile.index) && (
+                              <span className="px-1 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-bold shadow-xs">
+                                ✓
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Hover action button & dimension badge */}
+                          <div className="flex items-end justify-between gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <span className="px-1.5 py-0.5 rounded bg-[#171717]/80 text-[#F7F5F0] text-[9px] sm:text-[10px] font-mono">
+                              {tile.width}×{tile.height}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDownloadSingleTile(tile);
+                              }}
+                              className="px-2 py-1 bg-[#FF6B35] text-white text-[10px] font-bold rounded shadow hover:bg-[#e05825] flex items-center gap-1"
+                            >
+                              <Download className="w-3 h-3" />
+                              <span className="hidden xs:inline">Save</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <p className="text-[11px] text-[#171717]/55 mt-1 font-mono text-center">
-                  ← Swipe horizontally to preview continuous carousel panorama →
-                </p>
+
+                <div className="mt-3 flex items-center justify-between w-full text-xs text-[#171717]/65">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Assembled View: 100% of the image is preserved. Dashed lines indicate exact cut boundaries.</span>
+                  </span>
+                  <span className="font-mono text-[11px] hidden sm:inline">
+                    {activeRows} {activeRows === 1 ? 'row' : 'rows'} × {activeCols} {activeCols === 1 ? 'col' : 'cols'}
+                  </span>
+                </div>
+              </div>
+            ) : previewView === 'tiles' ? (
+              /* VIEW 2: SEPARATED INDIVIDUAL SLICES
+                 Each tile renders with ITS OWN TRUE ASPECT RATIO (tile.width / tile.height)
+                 No aspect-square. No object-cover cropping. */
+              <div>
+                {config.mode === 'rows' ? (
+                  /* Rows mode: Stack of wide horizontal rows */
+                  <div className="flex flex-col gap-3 sm:gap-4">
+                    {tiles.map((tile) => (
+                      <div
+                        key={tile.id}
+                        className="bg-white border border-[#171717]/15 rounded-xl overflow-hidden shadow-2xs hover:border-[#FF6B35] transition-all p-2.5 sm:p-3"
+                      >
+                        <div className="flex items-center justify-between pb-2 border-b border-[#171717]/10 mb-2 text-xs font-mono text-[#171717]/70">
+                          <span className="font-bold text-[#171717]">Row #{tile.row + 1} of {activeRows}</span>
+                          <div className="flex items-center gap-3">
+                            <span>{tile.width} × {tile.height} px</span>
+                            <span>{formatBytes(tile.blob.size, 1)}</span>
+                          </div>
+                        </div>
+
+                        {/* True proportional preview container */}
+                        <div
+                          className="relative w-full rounded-lg overflow-hidden bg-[#171717]/5 flex items-center justify-center border border-[#171717]/10"
+                          style={{ aspectRatio: `${tile.width} / ${tile.height}` }}
+                        >
+                          <img
+                            src={tile.dataUrl}
+                            alt={tile.fileName}
+                            className="w-full h-full block object-contain pointer-events-none"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2.5 mt-1">
+                          <span className="text-[11px] font-mono text-[#171717]/60 truncate">
+                            {tile.fileName}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTilePreview(tile)}
+                              className="px-3 py-1.5 min-h-[36px] text-xs font-semibold text-[#171717] bg-[#171717]/5 hover:bg-[#171717]/10 rounded-lg transition flex items-center gap-1 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Inspect</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadSingleTile(tile)}
+                              className="px-3.5 py-1.5 min-h-[36px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition flex items-center gap-1.5 cursor-pointer shadow-xs active:scale-95"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Save Row</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : config.mode === 'columns' ? (
+                  /* Columns mode: Row of tall vertical columns */
+                  <div
+                    className="grid gap-3 sm:gap-4 items-start"
+                    style={{
+                      gridTemplateColumns: `repeat(${activeCols}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {tiles.map((tile) => (
+                      <div
+                        key={tile.id}
+                        className="bg-white border border-[#171717]/15 rounded-xl overflow-hidden shadow-2xs hover:border-[#FF6B35] transition-all p-2 sm:p-2.5 flex flex-col"
+                      >
+                        <div className="flex items-center justify-between pb-1.5 border-b border-[#171717]/10 mb-2 text-[11px] font-mono text-[#171717]/70">
+                          <span className="font-bold text-[#171717]">Col #{tile.col + 1}</span>
+                          <span className="hidden xs:inline">{formatBytes(tile.blob.size, 1)}</span>
+                        </div>
+
+                        {/* True proportional preview container */}
+                        <div
+                          className="relative w-full rounded-lg overflow-hidden bg-[#171717]/5 flex items-center justify-center border border-[#171717]/10"
+                          style={{ aspectRatio: `${tile.width} / ${tile.height}` }}
+                        >
+                          <img
+                            src={tile.dataUrl}
+                            alt={tile.fileName}
+                            className="w-full h-full block object-contain pointer-events-none"
+                          />
+                        </div>
+
+                        <div className="pt-2 text-[10px] font-mono text-[#171717]/60 truncate">
+                          {tile.width}×{tile.height}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 pt-2 mt-auto">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTilePreview(tile)}
+                            className="flex-1 py-1.5 text-[11px] font-medium text-[#171717] bg-[#171717]/5 hover:bg-[#171717]/10 rounded transition text-center"
+                          >
+                            Inspect
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadSingleTile(tile)}
+                            className="flex-1 py-1.5 text-[11px] font-bold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded transition text-center flex items-center justify-center gap-1"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>Save</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : config.mode === 'carousel' ? (
+                  /* Carousel mode: Continuous horizontal swipe track */
+                  <div className="w-full">
+                    <div className="flex gap-3 overflow-x-auto pb-4 pt-1 px-0.5 scrollbar-thin snap-x snap-mandatory">
+                      {tiles.map((tile) => (
+                        <div
+                          key={tile.id}
+                          className="group relative bg-white border border-[#171717]/15 rounded-xl overflow-hidden flex flex-col transition-all hover:border-[#FF6B35] snap-center shrink-0 w-[72vw] xs:w-[54vw] sm:w-[42vw] md:w-60 shadow-2xs p-2.5"
+                        >
+                          <div className="flex items-center justify-between pb-1.5 text-xs font-mono text-[#171717]/70">
+                            <span className="font-bold text-[#171717]">Slide #{tile.index}</span>
+                            <span>{tile.width}×{tile.height}</span>
+                          </div>
+
+                          {/* True proportional slide container */}
+                          <div
+                            className="relative w-full rounded-lg overflow-hidden bg-[#171717]/5 flex items-center justify-center border border-[#171717]/10"
+                            style={{ aspectRatio: `${tile.width} / ${tile.height}` }}
+                          >
+                            <img
+                              src={tile.dataUrl}
+                              alt={tile.fileName}
+                              className="w-full h-full block object-contain pointer-events-none"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-2.5 mt-2 border-t border-[#171717]/10">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTilePreview(tile)}
+                              className="flex-1 py-1.5 text-xs font-medium text-[#171717] bg-[#171717]/5 hover:bg-[#171717]/10 rounded-md transition text-center"
+                            >
+                              Inspect
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadSingleTile(tile)}
+                              className="flex-1 py-1.5 text-xs font-bold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-md transition text-center flex items-center justify-center gap-1 shadow-xs"
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>Save</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-xs text-[#171717]/60 mt-1 font-mono text-center">
+                      ← Swipe horizontally to preview continuous slides →
+                    </p>
+                  </div>
+                ) : (
+                  /* Profile Grid mode: Multi-row x multi-col grid */
+                  <div
+                    className="grid gap-2 sm:gap-3 select-none"
+                    style={{
+                      gridTemplateColumns: `repeat(${activeCols}, minmax(0, 1fr))`,
+                    }}
+                  >
+                    {tiles.map((tile) => {
+                      const igOrderNumber =
+                        config.rows === 3 && config.cols === 3 ? 10 - tile.index : tile.index;
+
+                      return (
+                        <div
+                          key={tile.id}
+                          className="group relative bg-white border border-[#171717]/15 rounded-lg overflow-hidden flex flex-col transition-all hover:border-[#FF6B35] p-1.5 sm:p-2 shadow-2xs"
+                        >
+                          {/* Proportional preview container using exact tile aspect ratio */}
+                          <div
+                            className="relative w-full rounded bg-[#171717]/5 flex items-center justify-center overflow-hidden border border-[#171717]/10"
+                            style={{ aspectRatio: `${tile.width} / ${tile.height}` }}
+                          >
+                            <img
+                              src={tile.dataUrl}
+                              alt={tile.fileName}
+                              className="w-full h-full block object-contain pointer-events-none"
+                            />
+
+                            {/* Tile Sequence Indicator */}
+                            <div className="absolute top-1.5 left-1.5 z-10 px-1.5 py-0.5 rounded bg-[#171717]/80 text-[#F7F5F0] text-[10px] sm:text-[11px] font-mono shadow-xs backdrop-blur-xs">
+                              {showInstagramOrder ? `Post #${igOrderNumber}` : `#${tile.index}`}
+                            </div>
+
+                            {/* Downloaded status badge */}
+                            {downloadedTileIndices.has(tile.index) && (
+                              <div className="absolute top-1.5 right-1.5 z-10 px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold flex items-center gap-1 shadow-xs">
+                                <Check className="w-3 h-3" />
+                                <span className="hidden xs:inline">Saved</span>
+                              </div>
+                            )}
+
+                            {/* Hover Action Overlay */}
+                            <div className="absolute inset-0 bg-[#171717]/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-2">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedTilePreview(tile)}
+                                className="p-1.5 min-h-[36px] min-w-[36px] flex items-center justify-center bg-white text-[#171717] rounded-md hover:bg-[#F7F5F0] transition cursor-pointer"
+                                title="Inspect tile"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadSingleTile(tile)}
+                                className="p-1.5 min-h-[36px] min-w-[36px] flex items-center justify-center bg-[#FF6B35] text-white rounded-md hover:bg-[#e05825] transition cursor-pointer"
+                                title="Download this tile"
+                              >
+                                <Download className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Tile meta info footer */}
+                          <div className="pt-1.5 text-[10px] sm:text-[11px] flex items-center justify-between text-[#171717]/70 font-mono">
+                            <span className="truncate">{tile.width}×{tile.height}</span>
+                            <span className="hidden xs:inline">{formatBytes(tile.blob.size, 1)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ) : (
-              /* Grid mode (Profile 3x3, 2x2, etc.) */
-              <div
-                className="grid gap-2 sm:gap-3 select-none"
-                style={{
-                  gridTemplateColumns: `repeat(${config.cols}, minmax(0, 1fr))`,
-                }}
-              >
-                {tiles.map((tile) => {
-                  const igOrderNumber =
-                    config.rows === 3 && config.cols === 3 ? 10 - tile.index : tile.index;
-
-                  return (
-                    <div
-                      key={tile.id}
-                      onClick={() => setSelectedTilePreview(tile)}
-                      className="group relative bg-[#171717]/5 border border-[#171717]/15 rounded-lg overflow-hidden flex flex-col transition-all hover:border-[#FF6B35] cursor-pointer"
-                    >
-                      <div className="relative aspect-square w-full bg-[#171717]/10 flex items-center justify-center overflow-hidden">
-                        <img
-                          src={tile.dataUrl}
-                          alt={tile.fileName}
-                          className="w-full h-full object-cover pointer-events-none"
-                          referrerPolicy="no-referrer"
-                        />
-
-                        {/* Tile Sequence Indicator */}
-                        <div className="absolute top-1.5 sm:top-2 left-1.5 sm:left-2 z-10 px-1.5 sm:px-2 py-0.5 rounded bg-[#171717]/80 text-[#F7F5F0] text-[10px] sm:text-[11px] font-mono shadow-xs backdrop-blur-xs">
-                          {showInstagramOrder ? `Post #${igOrderNumber}` : `#${tile.index}`}
-                        </div>
-
-                        {/* Tile Downloaded Badge */}
-                        {downloadedTileIndices.has(tile.index) && (
-                          <div className="absolute top-1.5 sm:top-2 right-1.5 sm:right-2 z-10 px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold flex items-center gap-1 shadow-xs">
-                            <Check className="w-3 h-3" />
-                            <span className="hidden xs:inline">Saved</span>
-                          </div>
-                        )}
-
-                        {/* Hover Overlay with Preview and Download actions */}
-                        <div className="absolute inset-0 bg-[#171717]/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-2">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedTilePreview(tile);
-                            }}
-                            className="p-1.5 min-h-[36px] min-w-[36px] flex items-center justify-center bg-white text-[#171717] rounded-md hover:bg-[#F7F5F0] transition"
-                            title="Inspect tile"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDownloadSingleTile(tile);
-                            }}
-                            className="p-1.5 min-h-[36px] min-w-[36px] flex items-center justify-center bg-[#FF6B35] text-white rounded-md hover:bg-[#e05825] transition"
-                            title="Download this tile"
-                          >
-                            <Download className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Tile meta info footer */}
-                      <div className="p-1.5 sm:p-2 text-[10px] sm:text-[11px] bg-white border-t border-[#171717]/10 flex items-center justify-between text-[#171717]/70 font-mono">
-                        <span className="truncate">{tile.width}×{tile.height}</span>
-                        <span className="hidden xs:inline">{formatBytes(tile.blob.size, 1)}</span>
-                      </div>
+              /* VIEW 3: CAROUSEL SWIPE SIMULATOR */
+              tiles.length > 0 && (
+                <div className="w-full flex flex-col items-center py-2">
+                  <div className="w-full max-w-md bg-white border border-[#171717]/15 rounded-2xl p-4 shadow-sm">
+                    <div className="flex items-center justify-between pb-2 mb-3 border-b border-[#171717]/10 text-xs font-mono">
+                      <span className="font-bold text-[#171717]">
+                        Slide {carouselActiveSlide + 1} of {tiles.length}
+                      </span>
+                      <span className="text-[#171717]/60">
+                        {tiles[carouselActiveSlide]?.width} × {tiles[carouselActiveSlide]?.height} px
+                      </span>
                     </div>
-                  );
-                })}
-              </div>
+
+                    {/* Single Slide Canvas at True Aspect Ratio */}
+                    <div
+                      className="relative w-full rounded-xl overflow-hidden bg-[#171717]/5 flex items-center justify-center border border-[#171717]/10 shadow-2xs"
+                      style={{
+                        aspectRatio: `${tiles[carouselActiveSlide]?.width || 1} / ${tiles[carouselActiveSlide]?.height || 1}`,
+                      }}
+                    >
+                      <img
+                        src={tiles[carouselActiveSlide]?.dataUrl}
+                        alt={tiles[carouselActiveSlide]?.fileName}
+                        className="w-full h-full block object-contain pointer-events-none"
+                      />
+
+                      {/* Previous Slide Button */}
+                      {carouselActiveSlide > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setCarouselActiveSlide(carouselActiveSlide - 1)}
+                          className="absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#171717]/70 text-white hover:bg-[#171717] transition shadow-md cursor-pointer"
+                          aria-label="Previous slide"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                      )}
+
+                      {/* Next Slide Button */}
+                      {carouselActiveSlide < tiles.length - 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setCarouselActiveSlide(carouselActiveSlide + 1)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-[#171717]/70 text-white hover:bg-[#171717] transition shadow-md cursor-pointer"
+                          aria-label="Next slide"
+                        >
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Slide Navigation Dots */}
+                    <div className="flex items-center justify-center gap-1.5 mt-4">
+                      {tiles.map((_, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setCarouselActiveSlide(idx)}
+                          className={`w-2.5 h-2.5 rounded-full transition-all cursor-pointer ${
+                            carouselActiveSlide === idx
+                              ? 'bg-[#FF6B35] w-6'
+                              : 'bg-[#171717]/20 hover:bg-[#171717]/40'
+                          }`}
+                          aria-label={`Go to slide ${idx + 1}`}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-[#171717]/10 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTilePreview(tiles[carouselActiveSlide])}
+                        className="px-3 py-1.5 text-xs font-semibold text-[#171717] bg-[#171717]/5 hover:bg-[#171717]/10 rounded-lg transition"
+                      >
+                        Inspect Slide
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSingleTile(tiles[carouselActiveSlide])}
+                        className="px-3.5 py-1.5 text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition flex items-center gap-1.5 shadow-xs"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Download Slide #{carouselActiveSlide + 1}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
           </div>
 
-          {/* Social posting tip callout */}
-          <div className="p-4 bg-white/50 border border-[#171717]/10 rounded-xl text-xs text-[#171717]/70 flex items-start gap-3">
-            <AlertCircle className="w-4 h-4 text-[#FF6B35] shrink-0 mt-0.5" />
+          {/* Guarantee Banner */}
+          <div className="p-4 bg-emerald-50/80 border border-emerald-200 rounded-xl text-xs text-emerald-950 flex items-start gap-3 shadow-2xs">
+            <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <span className="font-semibold text-[#171717]">Seamless Boundary Guarantee:</span>
-              <p>
-                PIXORA uses remainder-distribution calculus across Canvas coordinates. Because image pixel dimensions
-                don't always divide evenly, odd remainder pixels are distributed across center tiles so there is zero rounding seam or blank pixel gap.
+              <span className="font-bold text-emerald-900">Zero Distortion & Seamless Reassembly Guarantee:</span>
+              <p className="text-emerald-800/90 leading-relaxed">
+                PIXORA uses pure integer remainder coordinate math directly from source image bitmap pixels. No forced square bounding, no CSS scaling, and no accidental edge cropping. When arranged back together, all slices reconstruct the exact original image down to the individual pixel.
               </p>
             </div>
           </div>
@@ -750,64 +1161,86 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
           <div className="bg-white/90 border border-[#171717]/10 rounded-xl p-5 shadow-xs flex flex-col gap-5">
             <div className="flex items-center justify-between pb-3 border-b border-[#171717]/10">
               <span className="text-xs font-bold uppercase tracking-wider text-[#171717]">
-                Grid Configuration
+                Splitter Configuration
               </span>
               <Sliders className="w-4 h-4 text-[#171717]/50" />
             </div>
 
-            {/* Split Mode Toggle: Grid vs Carousel */}
+            {/* 4 Tool Selector Tabs */}
             <div>
               <label className="block text-xs font-semibold text-[#171717] mb-2">
-                Splitting Mode
+                Choose Split Tool
               </label>
-              <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#171717]/5 rounded-lg">
+              <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#171717]/5 rounded-xl">
                 <button
                   type="button"
-                  onClick={() => setConfig({ ...config, mode: 'grid' })}
-                  className={`py-1.5 px-3 text-xs font-medium rounded-md transition-colors ${
+                  onClick={() => handleSelectMode('grid')}
+                  className={`py-2 px-2.5 text-xs rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
                     config.mode === 'grid'
-                      ? 'bg-white text-[#171717] shadow-xs font-semibold'
-                      : 'text-[#171717]/65 hover:text-[#171717]'
+                      ? 'bg-white text-[#171717] shadow-xs font-bold'
+                      : 'text-[#171717]/70 hover:text-[#171717]'
                   }`}
                 >
-                  Profile Grid (Rows × Cols)
+                  <Grid className="w-3.5 h-3.5 text-[#FF6B35]" />
+                  <span>Profile Grid</span>
                 </button>
+
                 <button
                   type="button"
-                  onClick={() =>
-                    setConfig({
-                      ...config,
-                      mode: 'carousel',
-                      carouselSlideCount: 3,
-                    })
-                  }
-                  className={`py-1.5 px-3 text-xs font-medium rounded-md transition-colors ${
-                    config.mode === 'carousel'
-                      ? 'bg-white text-[#171717] shadow-xs font-semibold'
-                      : 'text-[#171717]/65 hover:text-[#171717]'
+                  onClick={() => handleSelectMode('rows')}
+                  className={`py-2 px-2.5 text-xs rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    config.mode === 'rows'
+                      ? 'bg-white text-[#171717] shadow-xs font-bold'
+                      : 'text-[#171717]/70 hover:text-[#171717]'
                   }`}
                 >
-                  Seamless Carousel
+                  <Rows className="w-3.5 h-3.5 text-[#FF6B35]" />
+                  <span>Rows</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectMode('columns')}
+                  className={`py-2 px-2.5 text-xs rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    config.mode === 'columns'
+                      ? 'bg-white text-[#171717] shadow-xs font-bold'
+                      : 'text-[#171717]/70 hover:text-[#171717]'
+                  }`}
+                >
+                  <Columns className="w-3.5 h-3.5 text-[#FF6B35]" />
+                  <span>Columns</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectMode('carousel')}
+                  className={`py-2 px-2.5 text-xs rounded-lg transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                    config.mode === 'carousel'
+                      ? 'bg-white text-[#171717] shadow-xs font-bold'
+                      : 'text-[#171717]/70 hover:text-[#171717]'
+                  }`}
+                >
+                  <GalleryHorizontal className="w-3.5 h-3.5 text-[#FF6B35]" />
+                  <span>Carousel</span>
                 </button>
               </div>
             </div>
 
-            {/* Mode-specific Controls */}
-            {config.mode === 'grid' ? (
-              <>
-                {/* Quick Presets */}
+            {/* TOOL 1: PROFILE GRID CONTROLS */}
+            {config.mode === 'grid' && (
+              <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-[#171717] mb-2">
-                    Quick Grid Presets
+                    Profile Grid Presets
                   </label>
                   <div className="grid grid-cols-2 gap-2">
                     {[
                       { l: '3×3 Giant (IG)', r: 3, c: 3 },
-                      { l: '3×1 Wide Panorama', r: 1, c: 3 },
-                      { l: '3×2 Banner', r: 2, c: 3 },
-                      { l: '2×2 Quad', r: 2, c: 2 },
-                      { l: '4×3 Gallery', r: 3, c: 4 },
+                      { l: '2×2 Quad Grid', r: 2, c: 2 },
+                      { l: '3×4 Tall Profile', r: 4, c: 3 },
                       { l: '1×3 Vertical Column', r: 3, c: 1 },
+                      { l: '3×1 Wide Panorama', r: 1, c: 3 },
+                      { l: '3×2 Wide Banner', r: 2, c: 3 },
                     ].map((item, idx) => (
                       <button
                         key={idx}
@@ -815,7 +1248,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                         onClick={() =>
                           setConfig({ ...config, rows: item.r, cols: item.c })
                         }
-                        className={`text-xs py-1.5 px-2.5 rounded-md border text-left transition-colors ${
+                        className={`text-xs py-2 px-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
                           config.rows === item.r && config.cols === item.c
                             ? 'bg-[#171717] text-white border-[#171717] font-semibold'
                             : 'bg-white border-[#171717]/15 text-[#171717]/80 hover:border-[#171717]/40'
@@ -827,8 +1260,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                   </div>
                 </div>
 
-                {/* Custom Rows & Columns inputs */}
-                <div className="grid grid-cols-2 gap-3 pt-2">
+                <div className="grid grid-cols-2 gap-3 pt-1">
                   <div>
                     <label className="block text-xs font-semibold text-[#171717] mb-1">
                       Rows (1–10)
@@ -844,7 +1276,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                           rows: Math.max(1, Math.min(10, parseInt(e.target.value) || 1)),
                         })
                       }
-                      className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-md font-mono focus:border-[#FF6B35] focus:outline-none"
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-lg font-mono focus:border-[#FF6B35] focus:outline-none"
                     />
                   </div>
                   <div>
@@ -862,51 +1294,171 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                           cols: Math.max(1, Math.min(10, parseInt(e.target.value) || 1)),
                         })
                       }
-                      className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-md font-mono focus:border-[#FF6B35] focus:outline-none"
+                      className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-lg font-mono focus:border-[#FF6B35] focus:outline-none"
                     />
                   </div>
                 </div>
-              </>
-            ) : (
-              /* Carousel Mode Controls */
-              <div>
-                <label className="block text-xs font-semibold text-[#171717] mb-2">
-                  Number of Continuous Slides (2–10)
-                </label>
-                <div className="flex items-center gap-2 mb-3">
-                  {[2, 3, 4, 5, 6].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      onClick={() =>
-                        setConfig({ ...config, carouselSlideCount: num })
-                      }
-                      className={`flex-1 py-1.5 text-xs font-mono font-semibold rounded border ${
-                        config.carouselSlideCount === num
-                          ? 'bg-[#171717] text-white border-[#171717]'
-                          : 'bg-white border-[#171717]/20 text-[#171717]/80 hover:bg-[#171717]/5'
-                      }`}
-                    >
-                      {num}
-                    </button>
-                  ))}
+              </div>
+            )}
+
+            {/* TOOL 2: ROWS CONTROLS */}
+            {config.mode === 'rows' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#171717] mb-2">
+                    Horizontal Row Presets
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { l: '2 Rows (Halves)', r: 2 },
+                      { l: '3 Rows (Thirds)', r: 3 },
+                      { l: '4 Rows (Fourths)', r: 4 },
+                      { l: '5 Rows (Fifths)', r: 5 },
+                    ].map((item, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setConfig({ ...config, rows: item.r, cols: 1 })}
+                        className={`text-xs py-2 px-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                          config.rows === item.r
+                            ? 'bg-[#171717] text-white border-[#171717] font-semibold'
+                            : 'bg-white border-[#171717]/15 text-[#171717]/80 hover:border-[#171717]/40'
+                        }`}
+                      >
+                        {item.l}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min={2}
-                  max={10}
-                  value={config.carouselSlideCount}
-                  onChange={(e) =>
-                    setConfig({
-                      ...config,
-                      carouselSlideCount: parseInt(e.target.value),
-                    })
-                  }
-                  className="w-full accent-[#FF6B35]"
-                />
-                <div className="flex justify-between text-[11px] text-[#171717]/60 font-mono mt-1">
-                  <span>2 Slides</span>
-                  <span>10 Slides</span>
+
+                <div>
+                  <div className="flex items-center justify-between text-xs font-semibold text-[#171717] mb-1.5">
+                    <span>Number of Rows</span>
+                    <span className="font-mono text-[#FF6B35] font-bold">{config.rows} Rows</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    value={config.rows}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        rows: Math.max(1, Math.min(10, parseInt(e.target.value) || 1)),
+                        cols: 1,
+                      })
+                    }
+                    className="w-full accent-[#FF6B35]"
+                  />
+                  <div className="flex justify-between text-[11px] text-[#171717]/60 font-mono mt-1">
+                    <span>1 Row (Full)</span>
+                    <span>10 Rows</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TOOL 3: COLUMNS CONTROLS */}
+            {config.mode === 'columns' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#171717] mb-2">
+                    Vertical Column Presets
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { l: '2 Columns (Halves)', c: 2 },
+                      { l: '3 Columns (Thirds)', c: 3 },
+                      { l: '4 Columns (Fourths)', c: 4 },
+                      { l: '5 Columns (Fifths)', c: 5 },
+                    ].map((item, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => setConfig({ ...config, rows: 1, cols: item.c })}
+                        className={`text-xs py-2 px-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                          config.cols === item.c
+                            ? 'bg-[#171717] text-white border-[#171717] font-semibold'
+                            : 'bg-white border-[#171717]/15 text-[#171717]/80 hover:border-[#171717]/40'
+                        }`}
+                      >
+                        {item.l}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between text-xs font-semibold text-[#171717] mb-1.5">
+                    <span>Number of Columns</span>
+                    <span className="font-mono text-[#FF6B35] font-bold">{config.cols} Columns</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    value={config.cols}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        rows: 1,
+                        cols: Math.max(1, Math.min(10, parseInt(e.target.value) || 1)),
+                      })
+                    }
+                    className="w-full accent-[#FF6B35]"
+                  />
+                  <div className="flex justify-between text-[11px] text-[#171717]/60 font-mono mt-1">
+                    <span>1 Column (Full)</span>
+                    <span>10 Columns</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TOOL 4: SEAMLESS CAROUSEL CONTROLS */}
+            {config.mode === 'carousel' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-[#171717] mb-2">
+                    Continuous Swipe Slides (2–10)
+                  </label>
+                  <div className="flex items-center gap-1.5 mb-3">
+                    {[2, 3, 4, 5, 6].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() =>
+                          setConfig({ ...config, carouselSlideCount: num, cols: num, rows: 1 })
+                        }
+                        className={`flex-1 py-1.5 text-xs font-mono font-semibold rounded-lg border transition-colors cursor-pointer ${
+                          config.carouselSlideCount === num
+                            ? 'bg-[#171717] text-white border-[#171717]'
+                            : 'bg-white border-[#171717]/20 text-[#171717]/80 hover:bg-[#171717]/5'
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="range"
+                    min={2}
+                    max={10}
+                    value={config.carouselSlideCount}
+                    onChange={(e) =>
+                      setConfig({
+                        ...config,
+                        carouselSlideCount: parseInt(e.target.value),
+                        cols: parseInt(e.target.value),
+                        rows: 1,
+                      })
+                    }
+                    className="w-full accent-[#FF6B35]"
+                  />
+                  <div className="flex justify-between text-[11px] text-[#171717]/60 font-mono mt-1">
+                    <span>2 Slides</span>
+                    <span>10 Slides</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -923,7 +1475,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                       key={fmt}
                       type="button"
                       onClick={() => setConfig({ ...config, format: fmt })}
-                      className={`py-1 rounded text-center transition-colors ${
+                      className={`py-1 rounded text-center transition-colors cursor-pointer ${
                         config.format === fmt
                           ? 'bg-white text-[#171717] font-semibold shadow-xs'
                           : 'text-[#171717]/60 hover:text-[#171717]'
@@ -964,8 +1516,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                   onChange={(e) =>
                     setConfig({ ...config, fileNamePrefix: e.target.value })
                   }
-                  placeholder="e.g. instagram-grid"
-                  className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-md font-mono focus:border-[#FF6B35] focus:outline-none"
+                  placeholder="e.g. pixora-slice"
+                  className="w-full px-3 py-1.5 text-xs bg-white border border-[#171717]/20 rounded-lg font-mono focus:border-[#FF6B35] focus:outline-none"
                 />
                 <span className="block text-[11px] text-[#171717]/50 mt-1 font-mono">
                   Sample: {config.fileNamePrefix || 'tile'}-01.{config.format.split('/')[1]}
@@ -973,13 +1525,13 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Bottom Action: Download ZIP */}
+            {/* Bottom Action: Download All as ZIP */}
             <div className="pt-2">
               <button
                 type="button"
                 onClick={handleDownloadAllZip}
                 disabled={isProcessing || tiles.length === 0 || isZipping}
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-xs active:scale-95"
               >
                 {isZipping ? (
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -999,22 +1551,23 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
           <div className="bg-[#F7F5F0] border border-[#171717]/20 rounded-2xl max-w-lg w-full p-4 sm:p-5 shadow-2xl flex flex-col gap-3.5 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-2 border-b border-[#171717]/10">
               <span className="font-semibold text-sm text-[#171717]">
-                Tile #{selectedTilePreview.index} Details
+                Slice #{selectedTilePreview.index} Details
               </span>
               <button
                 type="button"
                 onClick={() => setSelectedTilePreview(null)}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-xs font-bold text-[#171717]/60 hover:text-[#171717] p-1 rounded-md"
+                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-xs font-bold text-[#171717]/60 hover:text-[#171717] p-1 rounded-md cursor-pointer"
               >
                 ✕ Close
               </button>
             </div>
 
-            <div className="w-full max-h-[36vh] sm:max-h-[46vh] bg-[#171717]/10 rounded-xl overflow-hidden flex items-center justify-center border border-[#171717]/15 p-2">
+            {/* Clean uncropped inspection container */}
+            <div className="w-full max-h-[42vh] bg-[#171717]/10 rounded-xl overflow-hidden flex items-center justify-center border border-[#171717]/15 p-2">
               <img
                 src={selectedTilePreview.dataUrl}
                 alt={selectedTilePreview.fileName}
-                className="max-w-full max-h-[32vh] sm:max-h-[42vh] object-contain rounded"
+                className="max-w-full max-h-[38vh] object-contain rounded"
               />
             </div>
 
@@ -1028,8 +1581,10 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                 <span className="font-semibold">{formatBytes(selectedTilePreview.blob.size)}</span>
               </div>
               <div>
-                <span className="text-[#171717]/60 block text-[10px] uppercase">Grid Position:</span>
-                <span className="font-semibold">Row {selectedTilePreview.row + 1}, Col {selectedTilePreview.col + 1}</span>
+                <span className="text-[#171717]/60 block text-[10px] uppercase">Aspect Ratio:</span>
+                <span className="font-semibold">
+                  {(selectedTilePreview.width / selectedTilePreview.height).toFixed(2)}:1
+                </span>
               </div>
               <div>
                 <span className="text-[#171717]/60 block text-[10px] uppercase">Filename:</span>
@@ -1043,7 +1598,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                 onClick={() => setSelectedTilePreview(null)}
                 className="px-4 py-2 min-h-[42px] text-xs font-medium text-[#171717]/70 hover:text-[#171717] rounded-lg cursor-pointer"
               >
-                Cancel
+                Close
               </button>
               <button
                 type="button"
@@ -1051,7 +1606,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                 className="px-4 py-2 min-h-[44px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-xl flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Download This Tile</span>
+                <span>Download This Slice</span>
               </button>
             </div>
           </div>

@@ -186,6 +186,10 @@ function AppContent() {
                     ? { rows: 3, cols: 3, mode: 'grid' }
                     : toolLaunch?.tool === 'splitter' && toolLaunch.preset?.useCase === 'carousel'
                     ? { rows: 1, cols: 3, mode: 'carousel' }
+                    : toolLaunch?.tool === 'splitter' && toolLaunch.preset?.useCase === 'rows'
+                    ? { rows: 3, cols: 1, mode: 'rows' }
+                    : toolLaunch?.tool === 'splitter' && toolLaunch.preset?.useCase === 'columns'
+                    ? { rows: 1, cols: 3, mode: 'columns' }
                     : undefined
                 }
                 onClearLaunch={() => {

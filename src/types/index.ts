@@ -25,7 +25,7 @@ export interface SplitTile {
   fileName: string;
 }
 
-export type SplitMode = 'grid' | 'carousel';
+export type SplitMode = 'grid' | 'rows' | 'columns' | 'carousel';
 
 export interface SplitConfig {
   mode: SplitMode;
@@ -114,7 +114,7 @@ export interface SocialPreset {
   supportedFormats: string[];
   maxFileSizeMB?: number;
   lastVerified: string;
-  useCase: 'grid' | 'carousel' | 'single' | 'banner';
+  useCase: 'grid' | 'carousel' | 'single' | 'banner' | 'rows' | 'columns';
   recommendedTool: ToolType;
   notes?: string;
 }
@@ -151,6 +151,7 @@ export interface UserProfile {
   email: string;
   name: string;
   isGuest: boolean;
+  isAdmin?: boolean;
   createdAt: number;
   emailVerified?: boolean;
   preferences: UserPreferences;

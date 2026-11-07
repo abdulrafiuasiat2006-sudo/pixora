@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { BRANDING } from '../../config/branding';
 import {
@@ -9,7 +9,8 @@ import {
   AlertCircle,
   ArrowRight,
   ShieldCheck,
-  Sparkles,
+  Clock,
+  KeyRound,
 } from 'lucide-react';
 
 interface LoginPageProps {
@@ -17,13 +18,47 @@ interface LoginPageProps {
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
-  const { login, loginWithGoogle, intendedRoute } = useAuth();
+  const { login, loginWithGoogle, checkLockout, intendedRoute } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
+  const [lockoutSeconds, setLockoutSeconds] = useState<number>(0);
+
+  // Live countdown timer for active progressive lockout
+  useEffect(() => {
+    if (lockoutSeconds <= 0) return;
+
+    const timer = setInterval(() => {
+      setLockoutSeconds((prev) => {
+        if (prev <= 1) {
+          setError(null);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [lockoutSeconds]);
+
+  // Check lockout on email input blur for early feedback
+  const handleEmailBlur = async () => {
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !cleanEmail.includes('@')) return;
+
+    try {
+      const status = await checkLockout(cleanEmail);
+      if (status.locked && status.remainingSeconds > 0) {
+        setLockoutSeconds(status.remainingSeconds);
+        setError(`This account is temporarily locked due to repeated failed attempts. Please wait for the lockout timer to expire, or click Forgot Password below to reset.`);
+      }
+    } catch {
+      // non-blocking
+    }
+  };
 
   const handleGoogleLogin = async () => {
     setError(null);
@@ -45,6 +80,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (lockoutSeconds > 0) {
+      setError(`Account is currently locked. Please wait ${formatTimeRemaining(lockoutSeconds)} before trying again, or reset your password.`);
+      return;
+    }
 
     const cleanEmail = email.trim();
     if (!cleanEmail) {
@@ -68,16 +108,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
       try {
         localStorage.setItem('pixora_last_login_email', cleanEmail);
       } catch {
-        // ignore local storage restrictions
+        // ignore storage restrictions
       }
 
       const res = await login(cleanEmail, password);
       if (res.success) {
-        // Redirect to intended route or dashboard
         const destination = intendedRoute || 'dashboard';
         onNavigate(destination);
       } else {
-        setError(res.error || 'Invalid credentials. Please verify your email and password.');
+        if (res.isLocked && res.remainingSeconds) {
+          setLockoutSeconds(res.remainingSeconds);
+        }
+        setError(res.error || 'Incorrect email or password. Please verify your credentials or click Forgot Password.');
       }
     } catch (err: any) {
       setError(err.message || 'An unexpected error occurred during login. Please try again.');
@@ -86,17 +128,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
     }
   };
 
-  const fillDemoCredentials = () => {
-    setEmail('creator@pixora.app');
-    setPassword('Pixora@2026!');
-    setError(null);
-  };
+  function formatTimeRemaining(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    if (mins > 0) {
+      return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    }
+    return `${secs}s`;
+  }
 
-  const fillOwnerCredentials = () => {
-    setEmail('abdulrafiuasiat2006@gmail.com');
-    setPassword('Pixora@2026!');
-    setError(null);
-  };
+  const isLocked = lockoutSeconds > 0;
 
   return (
     <div className="min-h-[calc(100vh-140px)] flex items-center justify-center px-4 py-8 sm:py-12">
@@ -114,34 +155,45 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
           </p>
         </div>
 
-        {/* Demo Quick-Fill Helper */}
-        <div className="mb-5 p-3 bg-[#F7F5F0] border border-[#171717]/10 rounded-lg flex items-center justify-between text-xs">
-          <div>
-            <span className="font-semibold text-[#171717]">Quick Access: </span>
-            <span className="font-mono text-[#171717]/70">creator@pixora.app</span>
+        {/* Active Lockout Banner with Live Countdown */}
+        {isLocked && (
+          <div
+            role="alert"
+            className="mb-5 p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 text-xs flex flex-col gap-2.5 animate-pulse"
+          >
+            <div className="flex items-start gap-2.5">
+              <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="flex-1 font-semibold leading-relaxed">
+                Account Temporarily Locked Against Brute-Force
+                <div className="text-amber-800 text-[11px] font-normal mt-0.5">
+                  Remaining time until unlock:{' '}
+                  <span className="font-mono font-bold text-amber-950 text-xs px-1.5 py-0.5 bg-amber-200/80 rounded">
+                    {formatTimeRemaining(lockoutSeconds)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="pt-2 border-t border-amber-200 flex items-center justify-between text-[11px]">
+              <span className="text-amber-800">Need immediate access?</span>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    localStorage.setItem('pixora_last_login_email', email.trim());
+                  } catch {}
+                  onNavigate('forgot-password');
+                }}
+                className="font-bold text-amber-950 underline hover:text-[#171717] flex items-center gap-1 cursor-pointer"
+              >
+                <KeyRound className="w-3 h-3" />
+                Reset Password Now
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={fillOwnerCredentials}
-              className="text-[11px] font-semibold text-[#171717] hover:underline cursor-pointer"
-              title="Auto-fill your account credentials"
-            >
-              Owner
-            </button>
-            <span className="text-[#171717]/30">|</span>
-            <button
-              type="button"
-              onClick={fillDemoCredentials}
-              className="text-[11px] font-semibold text-[#FF6B35] hover:underline cursor-pointer"
-            >
-              Demo
-            </button>
-          </div>
-        </div>
+        )}
 
-        {/* Error Alert with 1-Click Recovery Action */}
-        {error && (
+        {/* Standard Error Alert */}
+        {error && !isLocked && (
           <div
             role="alert"
             className="mb-5 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-xs flex flex-col gap-2"
@@ -151,7 +203,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
               <div className="flex-1 font-medium leading-relaxed">{error}</div>
             </div>
             <div className="pt-2 border-t border-red-200/80 flex items-center justify-between">
-              <span className="text-[11px] text-red-700">Can't remember password?</span>
+              <span className="text-[11px] text-red-700">Trouble logging in?</span>
               <button
                 type="button"
                 onClick={() => {
@@ -162,7 +214,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
                 }}
                 className="text-[11px] font-bold text-red-900 hover:text-[#171717] underline cursor-pointer"
               >
-                Reset Password Instantly &rarr;
+                Reset Password &rarr;
               </button>
             </div>
           </div>
@@ -183,6 +235,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                onBlur={handleEmailBlur}
                 required
                 className="w-full pl-9 pr-3 py-2.5 bg-white border border-[#171717]/20 rounded-lg text-sm text-[#171717] placeholder:text-[#171717]/40 focus:border-[#FF6B35] focus:ring-1 focus:ring-[#FF6B35] focus:outline-none transition"
               />
@@ -196,7 +249,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
               </label>
               <button
                 type="button"
-                onClick={() => onNavigate('forgot-password')}
+                onClick={() => {
+                  try {
+                    localStorage.setItem('pixora_last_login_email', email.trim());
+                  } catch {}
+                  onNavigate('forgot-password');
+                }}
                 className="text-[11px] font-semibold text-[#FF6B35] hover:underline"
               >
                 Forgot Password?
@@ -212,13 +270,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="w-full pl-9 pr-10 py-2.5 bg-white border border-[#171717]/20 rounded-lg text-sm text-[#171717] placeholder:text-[#171717]/40 focus:border-[#FF6B35] focus:ring-1 focus:ring-[#FF6B35] focus:outline-none transition"
+                disabled={isLocked}
+                className="w-full pl-9 pr-10 py-2.5 bg-white border border-[#171717]/20 rounded-lg text-sm text-[#171717] placeholder:text-[#171717]/40 focus:border-[#FF6B35] focus:ring-1 focus:ring-[#FF6B35] focus:outline-none transition disabled:bg-gray-100 disabled:cursor-not-allowed"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
+                disabled={isLocked}
                 aria-label={showPassword ? 'Hide password' : 'Show password'}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#171717]/50 hover:text-[#171717] transition"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#171717]/50 hover:text-[#171717] transition disabled:opacity-40"
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -227,13 +287,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate }) => {
 
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || isLocked}
             className="w-full mt-2 py-3 px-4 text-sm font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#171717]"
           >
             {isSubmitting ? (
               <>
                 <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />
                 <span>Authenticating...</span>
+              </>
+            ) : isLocked ? (
+              <>
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>Locked ({formatTimeRemaining(lockoutSeconds)})</span>
               </>
             ) : (
               <>

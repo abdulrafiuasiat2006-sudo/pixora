@@ -21,6 +21,9 @@ export interface AuthResponse {
   success: boolean;
   error?: string;
   message?: string;
+  isLocked?: boolean;
+  remainingSeconds?: number;
+  failedAttempts?: number;
 }
 
 interface AuthContextType {
@@ -29,6 +32,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   isGuest: boolean;
+  isAdmin: boolean;
   preferences: UserPreferences;
   intendedRoute: string | null;
   setIntendedRoute: (route: string | null) => void;
@@ -38,45 +42,128 @@ interface AuthContextType {
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<{ success: boolean; message: string; error?: string }>;
   sendVerificationEmail: () => Promise<{ success: boolean; message?: string; error?: string }>;
+  checkLockout: (email: string) => Promise<{ locked: boolean; remainingSeconds: number; failedAttempts: number }>;
   reloadUser: () => Promise<void>;
   updatePreferences: (newPrefs: Partial<UserPreferences>) => void;
   deleteAccount: () => Promise<void>;
 }
 
+function formatLockoutDuration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  }
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+  const hours = Math.ceil(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+/**
+ * Security-hardened error formatter.
+ * Strictly prevents account enumeration (does not disclose if an email exists).
+ */
 function formatFirebaseAuthError(error: any, context?: 'login' | 'signup' | 'reset-password' | 'verification'): string {
   const code = error?.code || '';
+  const message = error?.message || '';
+
+  if (code.includes('token-service') || message.includes('securetoken.googleapis.com') || message.includes('Token Service API')) {
+    return 'The Token Service API is initializing on your Google Cloud project. Please allow a few moments or enable it in Google Cloud Console.';
+  }
+
   switch (code) {
     case 'auth/invalid-email':
-      return 'The email address is invalid. Please check the spelling.';
+      return 'The email address format is invalid. Please check the spelling.';
     case 'auth/user-disabled':
       return 'This user account has been disabled. Please contact support.';
+    // Unified credentials error - no enumeration of existing accounts
     case 'auth/user-not-found':
-      return 'No account was found with this email. Please register.';
     case 'auth/wrong-password':
     case 'auth/invalid-credential':
+    case 'auth/invalid-login-credentials':
       return 'Incorrect email or password. Please verify your credentials or click Forgot Password.';
     case 'auth/email-already-in-use':
       return 'An account already exists with this email address. Please log in.';
     case 'auth/operation-not-allowed':
-      return 'Email/Password sign-in is not enabled in Firebase Console. Please enable Email/Password under Authentication > Sign-in method in Firebase Console.';
+      return 'Email/Password authentication is being initialized. Please verify configuration.';
     case 'auth/weak-password':
-      return 'Password is too weak. Please use at least 8 characters with letters and numbers.';
+      return 'Password is too weak. Please use at least 8 characters with letters, numbers, and symbols.';
     case 'auth/too-many-requests':
       if (context === 'verification') {
-        return 'A verification email was sent recently. Please check your spam/junk folder or wait 60 seconds before requesting another.';
+        return 'A verification email was sent recently. Please check your spam folder or wait 60 seconds before requesting another.';
       }
       if (context === 'reset-password') {
-        return 'A password reset request was recently submitted. Please check your spam/junk folder or wait a moment before trying again.';
+        return 'A password reset request was recently submitted. Please check your spam folder or wait a moment.';
       }
-      if (context === 'login') {
-        return 'Access temporarily blocked due to multiple failed login attempts. Please reset your password or try again later.';
-      }
-      return 'Too many requests. Please check your inbox/spam folder or wait a moment before trying again.';
+      return 'Access temporarily locked due to multiple failed login attempts. Please reset your password or try again later.';
     case 'auth/network-request-failed':
       return 'Network connection error. Please verify your internet connection.';
     default:
-      return error?.message || 'An unexpected authentication error occurred.';
+      return 'An unexpected authentication error occurred. Please try again.';
   }
+}
+
+// -------------------------------------------------------------
+// PROGRESSIVE LOCKOUT API CLIENT HELPERS
+// -------------------------------------------------------------
+async function checkServerLockout(email: string): Promise<{ locked: boolean; remainingSeconds: number; failedAttempts: number }> {
+  try {
+    const res = await fetch('/api/security/lockout-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.warn('[SECURITY CLIENT] Lockout check server request error:', e);
+  }
+  return { locked: false, remainingSeconds: 0, failedAttempts: 0 };
+}
+
+async function recordServerLoginFailure(email: string): Promise<{ locked: boolean; remainingSeconds: number; failedAttempts: number }> {
+  try {
+    const res = await fetch('/api/security/record-failure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.warn('[SECURITY CLIENT] Failed to report login failure:', e);
+  }
+  return { locked: false, remainingSeconds: 0, failedAttempts: 1 };
+}
+
+async function recordServerLoginSuccess(email: string): Promise<void> {
+  try {
+    await fetch('/api/security/record-success', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+  } catch (e) {
+    console.warn('[SECURITY CLIENT] Failed to report login success:', e);
+  }
+}
+
+async function verifyServerSession(idToken: string): Promise<{ isAdmin: boolean }> {
+  try {
+    const res = await fetch('/api/auth/session', {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return { isAdmin: Boolean(data?.user?.isAdmin) };
+    }
+  } catch {
+    // Non-blocking
+  }
+  return { isAdmin: false };
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -94,25 +181,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
       if (firebaseUser) {
-        try {
-          const idToken = await firebaseUser.getIdToken();
-          const profile: UserProfile = {
-            id: firebaseUser.uid,
-            name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Pixora Creator',
-            email: firebaseUser.email || '',
-            emailVerified: firebaseUser.emailVerified,
-            isGuest: false,
-            createdAt: firebaseUser.metadata.creationTime ? new Date(firebaseUser.metadata.creationTime).getTime() : Date.now(),
-            preferences: StorageService.getPreferences(),
-          };
+        let isAdmin = false;
+        let idToken = '';
 
-          setUser(profile);
+        try {
+          idToken = await firebaseUser.getIdToken();
           setToken(idToken);
           StorageService.setToken(idToken);
-          StorageService.saveUser(profile);
-        } catch (e) {
-          console.error('[FIREBASE AUTH] Failed to retrieve user token:', e);
+
+          const serverSession = await verifyServerSession(idToken);
+          isAdmin = serverSession.isAdmin;
+        } catch (e: any) {
+          console.warn('[FIREBASE AUTH] Token refresh note:', e?.message || e);
         }
+
+        const profile: UserProfile = {
+          id: firebaseUser.uid,
+          name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Pixora Creator',
+          email: firebaseUser.email || '',
+          emailVerified: firebaseUser.emailVerified,
+          isAdmin,
+          isGuest: false,
+          createdAt: firebaseUser.metadata.creationTime ? new Date(firebaseUser.metadata.creationTime).getTime() : Date.now(),
+          preferences: StorageService.getPreferences(),
+        };
+
+        setUser(profile);
+        StorageService.saveUser(profile);
       } else {
         setUser(null);
         setToken(null);
@@ -125,28 +220,73 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const login = async (email: string, password = ''): Promise<AuthResponse> => {
+    const cleanEmail = email.trim();
+
+    // 1. Check server-side lockout status FIRST before passing credentials
+    const lockoutStatus = await checkServerLockout(cleanEmail);
+    if (lockoutStatus.locked) {
+      const durationStr = formatLockoutDuration(lockoutStatus.remainingSeconds);
+      return {
+        success: false,
+        isLocked: true,
+        remainingSeconds: lockoutStatus.remainingSeconds,
+        failedAttempts: lockoutStatus.failedAttempts,
+        error: `Account is temporarily locked due to repeated failed login attempts. Please wait ${durationStr} before trying again, or use Forgot Password to reset.`,
+      };
+    }
+
     try {
-      const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-      const idToken = await cred.user.getIdToken();
+      const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+
+      // 2. On successful authentication, reset server lockout counter immediately
+      await recordServerLoginSuccess(cleanEmail);
+
+      let idToken = '';
+      let isAdmin = false;
+      try {
+        idToken = await cred.user.getIdToken();
+        const serverSession = await verifyServerSession(idToken);
+        isAdmin = serverSession.isAdmin;
+      } catch (tokenErr: any) {
+        console.warn('[FIREBASE AUTH] Token retrieval non-blocking notice:', tokenErr?.message || tokenErr);
+      }
+
       const userProfile: UserProfile = {
         id: cred.user.uid,
         name: cred.user.displayName || cred.user.email?.split('@')[0] || 'Pixora Creator',
-        email: cred.user.email || email.trim(),
+        email: cred.user.email || cleanEmail,
         emailVerified: cred.user.emailVerified,
+        isAdmin,
         createdAt: cred.user.metadata.creationTime ? new Date(cred.user.metadata.creationTime).getTime() : Date.now(),
         isGuest: false,
         preferences,
       };
 
-      StorageService.setToken(idToken);
+      if (idToken) StorageService.setToken(idToken);
       StorageService.saveUser(userProfile);
       setUser(userProfile);
-      setToken(idToken);
+      setToken(idToken || 'authenticated_session');
 
       return { success: true };
     } catch (err: any) {
+      // 3. On failure, report failure to server progressive lockout engine
+      const failureReport = await recordServerLoginFailure(cleanEmail);
+
+      if (failureReport.locked) {
+        const durationStr = formatLockoutDuration(failureReport.remainingSeconds);
+        return {
+          success: false,
+          isLocked: true,
+          remainingSeconds: failureReport.remainingSeconds,
+          failedAttempts: failureReport.failedAttempts,
+          error: `Access temporarily locked due to ${failureReport.failedAttempts} failed login attempts. Please wait ${durationStr} before trying again, or reset your password.`,
+        };
+      }
+
       return {
         success: false,
+        isLocked: false,
+        failedAttempts: failureReport.failedAttempts,
         error: formatFirebaseAuthError(err, 'login'),
       };
     }
@@ -156,21 +296,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const provider = new GoogleAuthProvider();
       const cred = await signInWithPopup(auth, provider);
-      const idToken = await cred.user.getIdToken();
+      let idToken = '';
+      let isAdmin = false;
+
+      try {
+        idToken = await cred.user.getIdToken();
+        const serverSession = await verifyServerSession(idToken);
+        isAdmin = serverSession.isAdmin;
+      } catch (tokenErr: any) {
+        console.warn('[FIREBASE AUTH] Token retrieval non-blocking notice:', tokenErr?.message || tokenErr);
+      }
+
       const userProfile: UserProfile = {
         id: cred.user.uid,
         name: cred.user.displayName || cred.user.email?.split('@')[0] || 'Pixora Creator',
         email: cred.user.email || '',
         emailVerified: cred.user.emailVerified,
+        isAdmin,
         createdAt: cred.user.metadata.creationTime ? new Date(cred.user.metadata.creationTime).getTime() : Date.now(),
         isGuest: false,
         preferences,
       };
 
-      StorageService.setToken(idToken);
+      if (idToken) StorageService.setToken(idToken);
       StorageService.saveUser(userProfile);
       setUser(userProfile);
-      setToken(idToken);
+      setToken(idToken || 'authenticated_session');
 
       return { success: true };
     } catch (err: any) {
@@ -182,8 +333,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signup = async (name: string, email: string, password = ''): Promise<AuthResponse> => {
+    const cleanEmail = email.trim();
     try {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      const cred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
       if (name.trim()) {
         try {
           await updateProfile(cred.user, { displayName: name.trim() });
@@ -192,25 +344,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // Automatically send email verification
+      // Automatically dispatch email verification
       try {
         await sendEmailVerification(cred.user);
       } catch (verErr) {
         console.warn('[FIREBASE AUTH] Initial verification email warning:', verErr);
       }
 
-      const idToken = await cred.user.getIdToken();
+      let idToken = '';
+      try {
+        idToken = await cred.user.getIdToken();
+      } catch (tokenErr: any) {
+        console.warn('[FIREBASE AUTH] Token retrieval non-blocking notice:', tokenErr?.message || tokenErr);
+      }
+
       const newUser: UserProfile = {
         id: cred.user.uid,
         name: name.trim() || cred.user.email?.split('@')[0] || 'Pixora Creator',
-        email: cred.user.email || email.trim(),
+        email: cred.user.email || cleanEmail,
         emailVerified: cred.user.emailVerified,
+        isAdmin: false,
         createdAt: Date.now(),
         isGuest: false,
         preferences,
       };
 
-      // Save user document in Firestore
+      // Save user document in Firestore adhering to zero-trust rules (no roles or permissions allowed)
       try {
         await setDoc(doc(db, 'users', cred.user.uid), {
           id: cred.user.uid,
@@ -220,17 +379,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           emailVerified: cred.user.emailVerified,
         });
       } catch (dbErr) {
-        console.warn('[FIREBASE FIRESTORE] User doc init warning:', dbErr);
+        console.warn('[FIREBASE FIRESTORE] User doc init notice:', dbErr);
       }
 
-      StorageService.setToken(idToken);
+      if (idToken) StorageService.setToken(idToken);
       StorageService.saveUser(newUser);
       setUser(newUser);
-      setToken(idToken);
+      setToken(idToken || 'authenticated_session');
 
       return {
         success: true,
-        message: 'Account created! We dispatched a verification link to your email.',
+        message: 'Account created! A verification link has been dispatched to your email address.',
       };
     } catch (err: any) {
       return {
@@ -252,13 +411,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const resetPassword = async (email: string): Promise<{ success: boolean; message: string; error?: string }> => {
+    const cleanEmail = email.trim();
     try {
-      await sendPasswordResetEmail(auth, email.trim());
+      await sendPasswordResetEmail(auth, cleanEmail);
       return {
         success: true,
-        message: `Password reset instructions have been sent to ${email.trim()}. Please check your inbox and spam folder.`,
+        message: `If an account exists for ${cleanEmail}, password reset instructions have been sent. Please check your inbox and spam folder.`,
       };
     } catch (err: any) {
+      const code = err?.code || '';
+      // Anti-enumeration: If user not found, return generic success message anyway
+      if (code === 'auth/user-not-found' || code === 'auth/invalid-email') {
+        return {
+          success: true,
+          message: `If an account exists for ${cleanEmail}, password reset instructions have been sent. Please check your inbox and spam folder.`,
+        };
+      }
       const errorMsg = formatFirebaseAuthError(err, 'reset-password');
       return {
         success: false,
@@ -276,7 +444,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await sendEmailVerification(auth.currentUser);
       return {
         success: true,
-        message: `A verification link has been sent to ${auth.currentUser.email}. Please check your inbox and spam folder.`,
+        message: `A verification link has been dispatched to ${auth.currentUser.email}. Please check your inbox and spam folder.`,
       };
     } catch (err: any) {
       return {
@@ -284,6 +452,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         error: formatFirebaseAuthError(err, 'verification'),
       };
     }
+  };
+
+  const checkLockout = async (email: string) => {
+    return checkServerLockout(email);
   };
 
   const reloadUser = async (): Promise<void> => {
@@ -337,6 +509,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: !!user && !!token && !user.isGuest,
         isLoading,
         isGuest: !user || !!user.isGuest,
+        isAdmin: !!user?.isAdmin,
         preferences,
         intendedRoute,
         setIntendedRoute,
@@ -346,6 +519,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         resetPassword,
         sendVerificationEmail,
+        checkLockout,
         reloadUser,
         updatePreferences,
         deleteAccount,

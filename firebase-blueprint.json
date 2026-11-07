@@ -28,16 +28,49 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "tool"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Designated administrator role record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string" },
+        "grantedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "role"]
+    },
+    "LoginLockout": {
+      "title": "LoginLockout",
+      "description": "Server-side progressive login failure and lockout record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "emailHash": { "type": "string" },
+        "failedAttempts": { "type": "number" },
+        "lockedUntil": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "emailHash", "failedAttempts", "lockedUntil"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "UserProfile",
-      "description": "User profile document"
+      "description": "User profile document isolated per user"
     },
     "/users/{userId}/projects/{projectId}": {
       "schema": "UserProject",
       "description": "User personal saved projects"
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminRecord",
+      "description": "Restricted administrative records"
+    },
+    "/login_lockouts/{lockoutId}": {
+      "schema": "LoginLockout",
+      "description": "Server-side lockout records protected from client tampering"
     }
   }
 }

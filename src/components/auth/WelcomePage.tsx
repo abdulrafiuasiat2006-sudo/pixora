@@ -51,10 +51,6 @@ export const WelcomePage: React.FC<WelcomePageProps> = ({ onNavigate }) => {
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
-
-        <p className="mt-3 text-xs text-[#171717]/60">
-          Already have credentials? Test account available: <span className="font-mono text-[#171717] font-medium">creator@pixora.app</span>
-        </p>
       </div>
 
       {/* Feature Highlights Grid */}

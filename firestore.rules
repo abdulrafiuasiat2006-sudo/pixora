@@ -1,12 +1,12 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Global catch-all default deny
+    // 1. Global catch-all default deny
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Hardened Security Helpers
+    // 2. Hardened Security Helpers
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -19,25 +19,66 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
     // Verification endpoint for connectivity check
     match /test/connection {
       allow read: if true;
     }
 
-    // Isolated User Profile
+    // 3. User Profile Document - Strictly Isolated
+    // Prevents identity spoofing, client privilege escalation, and unauthorized reads
     match /users/{userId} {
-      allow read: if isOwner(userId);
-      allow create: if isOwner(userId) && isValidId(userId);
-      allow update: if isOwner(userId);
-      allow delete: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Creating a user profile: user must match their auth UID, valid ID, and cannot assign roles or admin flags
+      allow create: if isOwner(userId) 
+        && isValidId(userId)
+        && incoming().id == userId
+        && (!incoming().keys().hasAny(['role', 'isAdmin', 'permissions']));
 
-      // User Projects Subcollection
+      // Updating a user profile: cannot self-escalate or tamper with role/isAdmin
+      allow update: if (isOwner(userId) || isAdmin())
+        && (!incoming().diff(existing()).affectedKeys().hasAny(['role', 'isAdmin', 'permissions']));
+
+      allow delete: if isOwner(userId) || isAdmin();
+
+      // 4. User Personal Projects Subcollection
       match /projects/{projectId} {
         allow read: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidId(projectId);
-        allow update: if isOwner(userId);
+        
+        allow create: if isOwner(userId) 
+          && isValidId(projectId)
+          && incoming().userId == userId;
+
+        allow update: if isOwner(userId) 
+          && incoming().userId == existing().userId;
+
         allow delete: if isOwner(userId);
       }
+    }
+
+    // 5. Designated Administrator Role Collection
+    // Read-only for verified admin self-check; client write is mathematically impossible
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+      allow write: if false;
+    }
+
+    // 6. Login Lockouts Collection
+    // Handled exclusively by backend server; client direct read or write is prohibited
+    match /login_lockouts/{lockoutId} {
+      allow read, write: if false;
     }
   }
 }
