@@ -14,6 +14,7 @@ import {
   triggerDownload,
   formatBytes,
 } from '../../utils/imageEngine';
+import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
 import {
   Grid,
@@ -80,6 +81,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
   const [downloadedTileIndices, setDownloadedTileIndices] = useState<Set<number>>(new Set());
   const [isProcessing, setIsProcessing] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
+  const [isBulkDownloading, setIsBulkDownloading] = useState(false);
+  const [showIndividualFilesModal, setShowIndividualFilesModal] = useState(false);
   const [selectedTilePreview, setSelectedTilePreview] = useState<SplitTile | null>(null);
   const [showInstagramOrder, setShowInstagramOrder] = useState(false);
   const [previewView, setPreviewView] = useState<'assembled' | 'tiles' | 'carousel'>('assembled');
@@ -350,7 +353,28 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     handleClearProject();
   };
 
-  const handleDownloadSingleTile = async (tile: SplitTile) => {
+  const completeAndClearWorkspace = async () => {
+    if (currentProject) {
+      const completedProj: FullWorkspaceProject = {
+        ...currentProject,
+        status: 'completed',
+        exportCount: tiles.length,
+        updatedAt: Date.now(),
+      };
+      await ProjectPersistenceService.saveProject(completedProj, false);
+    }
+    await ProjectPersistenceService.setActiveProject(userId, 'splitter', null);
+    setShowIndividualFilesModal(false);
+    setSelectedTilePreview(null);
+    setImageState(null);
+    setLoadedImgElement(null);
+    setTiles([]);
+    setCurrentProject(null);
+    setDownloadedTileIndices(new Set());
+    setSaveStatus('idle');
+  };
+
+  const handleDownloadSingleTile = async (tile: SplitTile, allowAutoClear: boolean = true) => {
     triggerDownload(tile.blob, tile.fileName);
     const nextSet = new Set(downloadedTileIndices);
     nextSet.add(tile.index);
@@ -364,25 +388,40 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
       ProjectPersistenceService.saveProject(updated, false).catch(() => {});
     }
 
-    // Auto-clear active workspace only when ALL tiles have been downloaded
-    if (tiles.length > 0 && nextSet.size >= tiles.length) {
-      if (currentProject) {
-        const completedProj: FullWorkspaceProject = {
-          ...currentProject,
-          status: 'completed',
-          exportCount: tiles.length,
-          updatedAt: Date.now(),
-        };
-        await ProjectPersistenceService.saveProject(completedProj, false);
-      }
-      await ProjectPersistenceService.setActiveProject(userId, 'splitter', null);
-      setImageState(null);
-      setLoadedImgElement(null);
-      setTiles([]);
-      setCurrentProject(null);
-      setDownloadedTileIndices(new Set());
-      setSaveStatus('idle');
+    // Auto-clear active workspace only when ALL tiles have been individually tapped and modal is not holding them
+    if (allowAutoClear && !showIndividualFilesModal && tiles.length > 0 && nextSet.size >= tiles.length) {
+      await completeAndClearWorkspace();
     }
+  };
+
+  const runSequentialIndividualDownloads = async (targetTiles: SplitTile[]) => {
+    if (targetTiles.length === 0) return;
+    setIsBulkDownloading(true);
+    try {
+      // Trigger first file synchronously on user click for strict browser gesture allowance
+      triggerDownload(targetTiles[0].blob, targetTiles[0].fileName);
+      for (let i = 1; i < targetTiles.length; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 280));
+        triggerDownload(targetTiles[i].blob, targetTiles[i].fileName);
+      }
+    } finally {
+      setIsBulkDownloading(false);
+    }
+  };
+
+  const handleDownloadIndividualFiles = async () => {
+    if (tiles.length === 0) return;
+
+    if (tiles.length === 1) {
+      triggerDownload(tiles[0].blob, tiles[0].fileName);
+      await completeAndClearWorkspace();
+      return;
+    }
+
+    // Multiple files: open the Individual Files panel so every file remains 1-tap downloadable
+    // even if the browser restricts automatic bulk downloads, and start sequential downloads.
+    setShowIndividualFilesModal(true);
+    await runSequentialIndividualDownloads(tiles);
   };
 
   const handleDownloadAllZip = async () => {
@@ -410,23 +449,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
       );
       triggerDownload(zipBlob, `${config.fileNamePrefix || 'pixora-tiles'}-all.zip`);
 
-      // Downloading full ZIP satisfies all required downloads for this split project
-      if (currentProject) {
-        const completedProj: FullWorkspaceProject = {
-          ...currentProject,
-          status: 'completed',
-          exportCount: tiles.length,
-          updatedAt: Date.now(),
-        };
-        await ProjectPersistenceService.saveProject(completedProj, false);
-      }
-      await ProjectPersistenceService.setActiveProject(userId, 'splitter', null);
-      setImageState(null);
-      setLoadedImgElement(null);
-      setTiles([]);
-      setCurrentProject(null);
-      setDownloadedTileIndices(new Set());
-      setSaveStatus('idle');
+      await completeAndClearWorkspace();
     } catch (e) {
       console.error('ZIP generation failed', e);
     } finally {
@@ -630,23 +653,21 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleDownloadAllZip}
-            disabled={isProcessing || tiles.length === 0 || isZipping}
-            className="px-4 py-2 min-h-[42px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
-          >
-            {isZipping ? (
-              <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-            ) : (
-              <Archive className="w-3.5 h-3.5" />
-            )}
-            <span>Export ZIP ({tiles.length} {tiles.length === 1 ? 'Slice' : 'Slices'})</span>
-          </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+          <DownloadOptions
+            layout="header"
+            onDownloadIndividual={handleDownloadIndividualFiles}
+            onDownloadZip={handleDownloadAllZip}
+            disabled={tiles.length === 0}
+            isProcessing={isProcessing}
+            isZipping={isZipping}
+            individualMeta={`${tiles.length} ${tiles.length === 1 ? 'file' : 'files'}`}
+            zipMeta=".zip"
+          />
 
           <button
             onClick={handleReset}
-            className="p-2 min-h-[42px] min-w-[42px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95"
+            className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95 self-end sm:self-auto"
             title="Start new image"
             aria-label="Reset workspace"
           >
@@ -1041,10 +1062,18 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                             </div>
                           </div>
 
-                          {/* Tile meta info footer */}
-                          <div className="pt-1.5 text-[10px] sm:text-[11px] flex items-center justify-between text-[#171717]/70 font-mono">
+                          {/* Tile meta info footer + Always-accessible touch Save button */}
+                          <div className="pt-1.5 text-[10px] sm:text-[11px] flex items-center justify-between gap-1 text-[#171717]/70 font-mono">
                             <span className="truncate">{tile.width}×{tile.height}</span>
-                            <span className="hidden xs:inline">{formatBytes(tile.blob.size, 1)}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadSingleTile(tile)}
+                              className="px-2 py-1 min-h-[28px] bg-[#FF6B35] hover:bg-[#e05825] text-white text-[10px] font-sans font-semibold rounded flex items-center gap-1 cursor-pointer shrink-0 active:scale-95"
+                              title={`Download ${tile.fileName}`}
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>Save</span>
+                            </button>
                           </div>
                         </div>
                       );
@@ -1525,21 +1554,18 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Bottom Action: Download All as ZIP */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleDownloadAllZip}
-                disabled={isProcessing || tiles.length === 0 || isZipping}
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-xs active:scale-95"
-              >
-                {isZipping ? (
-                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Archive className="w-4 h-4 text-[#FF6B35]" />
-                )}
-                <span>Download All as ZIP Archive</span>
-              </button>
+            {/* Bottom Action: Individual Files (Primary) & ZIP (Secondary) */}
+            <div className="pt-2 border-t border-[#171717]/10">
+              <DownloadOptions
+                layout="panel"
+                onDownloadIndividual={handleDownloadIndividualFiles}
+                onDownloadZip={handleDownloadAllZip}
+                disabled={tiles.length === 0}
+                isProcessing={isProcessing}
+                isZipping={isZipping}
+                individualMeta={`${tiles.length} ${tiles.length === 1 ? 'file' : 'files'}`}
+                zipMeta=".zip"
+              />
             </div>
           </div>
         </div>
@@ -1607,6 +1633,129 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Download This Slice</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* INDIVIDUAL FILES FALLBACK & DIRECT SAVE MODAL */}
+      {showIndividualFilesModal && tiles.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#171717]/75 p-3 sm:p-4">
+          <div className="bg-[#F7F5F0] border border-[#171717]/20 rounded-2xl max-w-2xl w-full p-4 sm:p-6 shadow-2xl flex flex-col gap-4 max-h-[90vh]">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-[#171717]/10">
+              <div>
+                <h2 className="font-bold text-base sm:text-lg text-[#171717]">
+                  Download Individual Image Files ({tiles.length})
+                </h2>
+                <p className="text-xs text-[#171717]/70 mt-1 leading-relaxed">
+                  {isBulkDownloading
+                    ? 'Sending individual image files to your device...'
+                    : 'Every file below is an independently usable image (no ZIP extraction required). If your browser blocks multiple automatic downloads, tap any file below to save it directly.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowIndividualFilesModal(false)}
+                className="min-h-[38px] min-w-[38px] flex items-center justify-center text-xs font-bold text-[#171717]/60 hover:text-[#171717] px-2.5 py-1.5 rounded-lg border border-[#171717]/15 bg-white cursor-pointer shrink-0"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Individual File List (Scrollable, touch-friendly across Mobile/Tablet/Desktop) */}
+            <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+              {tiles.map((tile) => {
+                const isSaved = downloadedTileIndices.has(tile.index);
+                const igOrderNumber =
+                  config.rows === 3 && config.cols === 3 && config.mode === 'grid'
+                    ? 10 - tile.index
+                    : tile.index;
+
+                return (
+                  <div
+                    key={tile.id}
+                    className="bg-white border border-[#171717]/15 rounded-xl p-2.5 sm:p-3 flex items-center justify-between gap-3 shadow-2xs"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-lg bg-[#171717]/5 border border-[#171717]/10 overflow-hidden flex items-center justify-center shrink-0">
+                        <img
+                          src={tile.dataUrl}
+                          alt={tile.fileName}
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-bold text-[#171717] font-mono truncate">
+                            {tile.fileName}
+                          </span>
+                          {config.rows === 3 && config.cols === 3 && config.mode === 'grid' && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#171717]/5 text-[#171717]/70">
+                              IG Post #{igOrderNumber}
+                            </span>
+                          )}
+                          {isSaved && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              <Check className="w-2.5 h-2.5" />
+                              Saved
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] font-mono text-[#171717]/60 mt-0.5">
+                          {tile.width} × {tile.height} px · {formatBytes(tile.blob.size)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadSingleTile(tile, false)}
+                      className={`px-3 sm:px-4 py-2 min-h-[40px] text-xs font-semibold rounded-lg transition flex items-center gap-1.5 shrink-0 cursor-pointer active:scale-95 ${
+                        isSaved
+                          ? 'bg-[#171717]/10 text-[#171717] hover:bg-[#171717]/15'
+                          : 'bg-[#FF6B35] hover:bg-[#e05825] text-white shadow-xs'
+                      }`}
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>{isSaved ? 'Save Again' : 'Download'}</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Modal Footer: Retry bulk, Optional ZIP fallback, Finish & Clear */}
+            <div className="pt-3 border-t border-[#171717]/10 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => runSequentialIndividualDownloads(tiles)}
+                  disabled={isBulkDownloading}
+                  className="px-3.5 py-2 min-h-[42px] text-xs font-semibold text-[#171717] bg-white hover:bg-[#171717]/5 border border-[#171717]/20 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#FF6B35]" />
+                  <span>{isBulkDownloading ? 'Downloading...' : 'Retry All Individual'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadAllZip}
+                  disabled={isZipping}
+                  className="px-3.5 py-2 min-h-[42px] text-xs font-semibold text-[#171717] bg-white hover:bg-[#171717]/5 border border-[#171717]/20 rounded-lg transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  <Archive className="w-3.5 h-3.5 text-[#171717]/75" />
+                  <span>{isZipping ? 'Packaging ZIP...' : 'Download as ZIP Instead'}</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={completeAndClearWorkspace}
+                className="px-4 py-2 min-h-[42px] text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5 text-[#FF6B35]" />
+                <span>Done &amp; Clear Project</span>
               </button>
             </div>
           </div>

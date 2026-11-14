@@ -11,9 +11,11 @@ import {
   loadImageElement,
   cropImage,
   CropResult,
+  createFilesZipArchive,
   triggerDownload,
   formatBytes,
 } from '../../utils/imageEngine';
+import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
 import {
   Crop,
@@ -77,6 +79,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
 
   const [cropResult, setCropResult] = useState<CropResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
 
   // References for dragging
   const containerRef = useRef<HTMLDivElement>(null);
@@ -562,13 +565,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     handleClearProject();
   };
 
-  const handleDownload = async () => {
-    if (!cropResult || !imageState) return;
-    const baseName = imageState.name.replace(/\.[^/.]+$/, '');
-    const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
-    triggerDownload(cropResult.blob, `${baseName}-cropped.${ext}`);
-
-    // Mark project completed and clear from active workspace
+  const completeAndClearWorkspace = async () => {
     if (currentProject) {
       const completedProj: FullWorkspaceProject = {
         ...currentProject,
@@ -580,12 +577,47 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     }
     await ProjectPersistenceService.setActiveProject(userId, 'cropper', null);
 
-    // Reset workspace to empty upload state
     setImageState(null);
     setLoadedImgElement(null);
     setCropResult(null);
     setCurrentProject(null);
     setSaveStatus('idle');
+  };
+
+  const handleDownloadIndividual = async () => {
+    if (!cropResult || !imageState) return;
+    const baseName = imageState.name.replace(/\.[^/.]+$/, '');
+    const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
+    triggerDownload(cropResult.blob, `${baseName}-cropped.${ext}`);
+    await completeAndClearWorkspace();
+  };
+
+  const handleDownloadZip = async () => {
+    if (!cropResult || !imageState) return;
+    setIsZipping(true);
+    try {
+      const baseName = imageState.name.replace(/\.[^/.]+$/, '');
+      const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
+      const outputFileName = `${baseName}-cropped.${ext}`;
+      const zipBlob = await createFilesZipArchive(
+        [
+          {
+            fileName: outputFileName,
+            blob: cropResult.blob,
+            width: cropResult.width,
+            height: cropResult.height,
+          },
+        ],
+        'PIXORA — Image Cropper Export Manifest',
+        `Crop preset: ${config.aspectPreset.toUpperCase()} | Dimensions: ${cropResult.width}x${cropResult.height} px | Rotation: ${config.rotation}°`
+      );
+      triggerDownload(zipBlob, `${baseName}-cropped.zip`);
+      await completeAndClearWorkspace();
+    } catch (err) {
+      console.error('ZIP creation failed:', err);
+    } finally {
+      setIsZipping(false);
+    }
   };
 
   const aspectPresetsList: { id: CropAspectPreset; label: string; desc: string }[] = [
@@ -708,19 +740,21 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleDownload}
-            disabled={!cropResult || isProcessing}
-            className="px-4 py-2 min-h-[42px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Download ({cropResult ? `${cropResult.width}×${cropResult.height}` : '...'})</span>
-          </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+          <DownloadOptions
+            layout="header"
+            onDownloadIndividual={handleDownloadIndividual}
+            onDownloadZip={handleDownloadZip}
+            disabled={!cropResult}
+            isProcessing={isProcessing}
+            isZipping={isZipping}
+            individualMeta={cropResult ? `${cropResult.width}×${cropResult.height}` : undefined}
+            zipMeta=".zip"
+          />
 
           <button
             onClick={handleReset}
-            className="p-2 min-h-[42px] min-w-[42px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95"
+            className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95 self-end sm:self-auto"
             title="Start new image"
             aria-label="Reset workspace"
           >
@@ -1037,19 +1071,18 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
               )}
             </div>
 
-            {/* Download Button */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={!cropResult || isProcessing}
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                <Download className="w-4 h-4 text-[#FF6B35]" />
-                <span>
-                  Download Cropped ({cropResult ? `${cropResult.width}×${cropResult.height}` : '...'})
-                </span>
-              </button>
+            {/* Download Options (Individual Files & ZIP) */}
+            <div className="pt-2 border-t border-[#171717]/10">
+              <DownloadOptions
+                layout="panel"
+                onDownloadIndividual={handleDownloadIndividual}
+                onDownloadZip={handleDownloadZip}
+                disabled={!cropResult}
+                isProcessing={isProcessing}
+                isZipping={isZipping}
+                individualMeta={cropResult ? `${cropResult.width}×${cropResult.height}` : undefined}
+                zipMeta=".zip"
+              />
             </div>
           </div>
         </div>

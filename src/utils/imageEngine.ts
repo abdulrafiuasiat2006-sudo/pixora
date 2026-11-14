@@ -202,32 +202,40 @@ export async function splitImage(
   };
 }
 
+export interface ExportableFile {
+  fileName: string;
+  blob: Blob;
+  width?: number;
+  height?: number;
+}
+
 /**
- * Packages all split tiles into a single ZIP archive using JSZip.
+ * Packages one or more generated image files into a single valid ZIP archive using JSZip.
  */
-export async function createZipArchive(
-  tiles: SplitTile[],
-  zipFileName: string = 'pixora-split-export.zip',
+export async function createFilesZipArchive(
+  files: ExportableFile[],
+  manifestTitle: string = 'PIXORA — Export Manifest',
   instructionNote?: string
 ): Promise<Blob> {
   const zip = new JSZip();
 
-  // Add individual tiles
-  for (const tile of tiles) {
-    zip.file(tile.fileName, tile.blob);
+  for (const file of files) {
+    zip.file(file.fileName, file.blob);
   }
 
-  // Add an informative README / posting guide inside the zip
   const manifestContent = [
-    'PIXORA — Image Split Export Manifest',
-    '====================================',
+    manifestTitle,
+    '='.repeat(Math.max(24, manifestTitle.length)),
     `Exported: ${new Date().toISOString()}`,
-    `Total Tiles: ${tiles.length}`,
+    `Total Files: ${files.length}`,
     '',
-    instructionNote || 'Tiles are sequentially numbered in post order.',
+    instructionNote || 'All generated image files are packaged in full quality.',
     '',
-    'Tile Dimensions:',
-    ...tiles.map((t) => `  ${t.fileName}: ${t.width}x${t.height} px (${formatBytes(t.blob.size)})`),
+    'Included Files:',
+    ...files.map((f) => {
+      const dims = f.width && f.height ? `${f.width}x${f.height} px, ` : '';
+      return `  ${f.fileName}: ${dims}${formatBytes(f.blob.size)}`;
+    }),
     '',
     'Created with PIXORA (Your images. Every format. One place.)',
   ].join('\n');
@@ -239,6 +247,26 @@ export async function createZipArchive(
     compression: 'DEFLATE',
     compressionOptions: { level: 6 },
   });
+}
+
+/**
+ * Packages all split tiles into a single ZIP archive using JSZip.
+ */
+export async function createZipArchive(
+  tiles: SplitTile[],
+  _zipFileName: string = 'pixora-split-export.zip',
+  instructionNote?: string
+): Promise<Blob> {
+  return createFilesZipArchive(
+    tiles.map((t) => ({
+      fileName: t.fileName,
+      blob: t.blob,
+      width: t.width,
+      height: t.height,
+    })),
+    'PIXORA — Image Split Export Manifest',
+    instructionNote || 'Tiles are sequentially numbered in post order.'
+  );
 }
 
 // ==========================================
@@ -511,6 +539,7 @@ export async function cropImage(
 
 /**
  * Downloads a Blob directly with specified filename.
+ * Uses a generous cleanup delay so mobile Safari / Android / desktop browsers complete handoff.
  */
 export function triggerDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
@@ -518,10 +547,13 @@ export function triggerDownload(blob: Blob, fileName: string): void {
   a.style.display = 'none';
   a.href = url;
   a.download = fileName;
+  a.rel = 'noopener';
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
-    document.body.removeChild(a);
+    if (a.parentNode) {
+      document.body.removeChild(a);
+    }
     URL.revokeObjectURL(url);
-  }, 100);
+  }, 1500);
 }

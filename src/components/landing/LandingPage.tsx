@@ -118,7 +118,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStartTool, onNavigat
                 <br />
                 · Instagram post 9→1 guide
                 <br />
-                · One-click ZIP download
+                · Individual files &amp; ZIP download
               </div>
             </div>
 

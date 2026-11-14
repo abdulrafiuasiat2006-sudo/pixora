@@ -9,9 +9,11 @@ import {
   loadImageElement,
   resizeImage,
   ResizeResult,
+  createFilesZipArchive,
   triggerDownload,
   formatBytes,
 } from '../../utils/imageEngine';
+import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
 import {
   Lock,
@@ -65,6 +67,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
 
   const [result, setResult] = useState<ResizeResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
   const [dimensionWarning, setDimensionWarning] = useState<string | null>(null);
 
   const applyLoadedProject = (proj: FullWorkspaceProject) => {
@@ -370,12 +373,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
     setConfig({ ...config, width: newW, height: newH });
   };
 
-  const handleDownload = async () => {
-    if (!result || !imageState) return;
-    const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
-    triggerDownload(result.blob, `${config.fileName || 'pixora-resized'}.${ext}`);
-
-    // Mark project completed and clear from active workspace
+  const completeAndClearWorkspace = async () => {
     if (currentProject) {
       const completedProj: FullWorkspaceProject = {
         ...currentProject,
@@ -387,12 +385,46 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
     }
     await ProjectPersistenceService.setActiveProject(userId, 'resizer', null);
 
-    // Reset workspace to empty upload state
     setImageState(null);
     setLoadedImgElement(null);
     setResult(null);
     setCurrentProject(null);
     setSaveStatus('idle');
+  };
+
+  const handleDownloadIndividual = async () => {
+    if (!result || !imageState) return;
+    const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
+    triggerDownload(result.blob, `${config.fileName || 'pixora-resized'}.${ext}`);
+    await completeAndClearWorkspace();
+  };
+
+  const handleDownloadZip = async () => {
+    if (!result || !imageState) return;
+    setIsZipping(true);
+    try {
+      const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
+      const baseName = config.fileName || 'pixora-resized';
+      const outputFileName = `${baseName}.${ext}`;
+      const zipBlob = await createFilesZipArchive(
+        [
+          {
+            fileName: outputFileName,
+            blob: result.blob,
+            width: result.width,
+            height: result.height,
+          },
+        ],
+        'PIXORA — Image Resizer Export Manifest',
+        `Original dimensions: ${result.originalWidth}x${result.originalHeight} px | Resized dimensions: ${result.width}x${result.height} px`
+      );
+      triggerDownload(zipBlob, `${baseName}.zip`);
+      await completeAndClearWorkspace();
+    } catch (err) {
+      console.error('ZIP creation failed:', err);
+    } finally {
+      setIsZipping(false);
+    }
   };
 
   const commonPresets = [
@@ -501,19 +533,21 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleDownload}
-            disabled={!result || isProcessing}
-            className="px-4 py-2 min-h-[42px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Download ({result ? formatBytes(result.sizeBytes) : '...'})</span>
-          </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+          <DownloadOptions
+            layout="header"
+            onDownloadIndividual={handleDownloadIndividual}
+            onDownloadZip={handleDownloadZip}
+            disabled={!result}
+            isProcessing={isProcessing}
+            isZipping={isZipping}
+            individualMeta={result ? formatBytes(result.sizeBytes) : undefined}
+            zipMeta=".zip"
+          />
 
           <button
             onClick={handleReset}
-            className="p-2 min-h-[42px] min-w-[42px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95"
+            className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95 self-end sm:self-auto"
             title="Start new image"
             aria-label="Reset workspace"
           >
@@ -757,19 +791,18 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
               )}
             </div>
 
-            {/* Action */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={!result || isProcessing}
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                <Download className="w-4 h-4 text-[#FF6B35]" />
-                <span>
-                  Download Resized Image ({result ? formatBytes(result.sizeBytes) : '...'})
-                </span>
-              </button>
+            {/* Action: Download Options (Individual Files & ZIP) */}
+            <div className="pt-2 border-t border-[#171717]/10">
+              <DownloadOptions
+                layout="panel"
+                onDownloadIndividual={handleDownloadIndividual}
+                onDownloadZip={handleDownloadZip}
+                disabled={!result}
+                isProcessing={isProcessing}
+                isZipping={isZipping}
+                individualMeta={result ? formatBytes(result.sizeBytes) : undefined}
+                zipMeta=".zip"
+              />
             </div>
           </div>
         </div>

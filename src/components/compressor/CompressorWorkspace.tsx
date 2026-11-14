@@ -9,9 +9,11 @@ import { ImageDropzone } from '../common/ImageDropzone';
 import {
   loadImageElement,
   compressImage,
+  createFilesZipArchive,
   triggerDownload,
   formatBytes,
 } from '../../utils/imageEngine';
+import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
 import {
   Sliders,
@@ -66,6 +68,7 @@ export const CompressorWorkspace: React.FC<CompressorWorkspaceProps> = ({
 
   const [result, setResult] = useState<CompressionResult | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
   const [viewMode, setViewMode] = useState<'split' | 'side-by-side' | 'compressed-only'>('split');
   const [splitSliderPos, setSplitSliderPos] = useState(50);
 
@@ -326,13 +329,7 @@ export const CompressorWorkspace: React.FC<CompressorWorkspaceProps> = ({
     handleClearProject();
   };
 
-  const handleDownload = async () => {
-    if (!result || !imageState) return;
-    const baseName = imageState.name.replace(/\.[^/.]+$/, '');
-    const ext = result.format === 'image/png' ? 'png' : result.format === 'image/webp' ? 'webp' : 'jpg';
-    triggerDownload(result.blob, `${baseName}-compressed.${ext}`);
-
-    // Mark project completed and clear from active workspace
+  const completeAndClearWorkspace = async () => {
     if (currentProject) {
       const completedProj: FullWorkspaceProject = {
         ...currentProject,
@@ -344,12 +341,47 @@ export const CompressorWorkspace: React.FC<CompressorWorkspaceProps> = ({
     }
     await ProjectPersistenceService.setActiveProject(userId, 'compressor', null);
 
-    // Reset workspace to empty upload state
     setImageState(null);
     setLoadedImgElement(null);
     setResult(null);
     setCurrentProject(null);
     setSaveStatus('idle');
+  };
+
+  const handleDownloadIndividual = async () => {
+    if (!result || !imageState) return;
+    const baseName = imageState.name.replace(/\.[^/.]+$/, '');
+    const ext = result.format === 'image/png' ? 'png' : result.format === 'image/webp' ? 'webp' : 'jpg';
+    triggerDownload(result.blob, `${baseName}-compressed.${ext}`);
+    await completeAndClearWorkspace();
+  };
+
+  const handleDownloadZip = async () => {
+    if (!result || !imageState) return;
+    setIsZipping(true);
+    try {
+      const baseName = imageState.name.replace(/\.[^/.]+$/, '');
+      const ext = result.format === 'image/png' ? 'png' : result.format === 'image/webp' ? 'webp' : 'jpg';
+      const outputFileName = `${baseName}-compressed.${ext}`;
+      const zipBlob = await createFilesZipArchive(
+        [
+          {
+            fileName: outputFileName,
+            blob: result.blob,
+            width: result.width,
+            height: result.height,
+          },
+        ],
+        'PIXORA — Image Compression Export Manifest',
+        `Original size: ${formatBytes(result.originalSize)} | Compressed size: ${formatBytes(result.compressedSize)} (${result.reductionPercentage.toFixed(1)}% reduction)`
+      );
+      triggerDownload(zipBlob, `${baseName}-compressed.zip`);
+      await completeAndClearWorkspace();
+    } catch (err) {
+      console.error('ZIP creation failed:', err);
+    } finally {
+      setIsZipping(false);
+    }
   };
 
   // Quick target size presets
@@ -461,19 +493,21 @@ export const CompressorWorkspace: React.FC<CompressorWorkspaceProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={handleDownload}
-            disabled={!result || isCompressing}
-            className="px-4 py-2 min-h-[42px] text-xs font-semibold text-white bg-[#FF6B35] hover:bg-[#e05825] rounded-lg transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50 cursor-pointer active:scale-95"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Download ({result ? formatBytes(result.compressedSize) : '...'})</span>
-          </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+          <DownloadOptions
+            layout="header"
+            onDownloadIndividual={handleDownloadIndividual}
+            onDownloadZip={handleDownloadZip}
+            disabled={!result}
+            isProcessing={isCompressing}
+            isZipping={isZipping}
+            individualMeta={result ? formatBytes(result.compressedSize) : undefined}
+            zipMeta=".zip"
+          />
 
           <button
             onClick={handleReset}
-            className="p-2 min-h-[42px] min-w-[42px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95"
+            className="p-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-[#171717]/70 hover:text-[#171717] hover:bg-[#171717]/10 rounded-lg transition-colors cursor-pointer active:scale-95 self-end sm:self-auto"
             title="Start new image"
             aria-label="Reset workspace"
           >
@@ -838,19 +872,18 @@ export const CompressorWorkspace: React.FC<CompressorWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Action: Download Compressed Result */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={handleDownload}
-                disabled={!result || isCompressing}
-                className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                <Download className="w-4 h-4 text-[#FF6B35]" />
-                <span>
-                  Download Compressed Image ({result ? formatBytes(result.compressedSize) : '...'})
-                </span>
-              </button>
+            {/* Action: Download Options (Individual Files & ZIP) */}
+            <div className="pt-2 border-t border-[#171717]/10">
+              <DownloadOptions
+                layout="panel"
+                onDownloadIndividual={handleDownloadIndividual}
+                onDownloadZip={handleDownloadZip}
+                disabled={!result}
+                isProcessing={isCompressing}
+                isZipping={isZipping}
+                individualMeta={result ? formatBytes(result.compressedSize) : undefined}
+                zipMeta=".zip"
+              />
             </div>
           </div>
         </div>
