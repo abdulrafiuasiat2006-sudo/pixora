@@ -94,16 +94,16 @@ export const QATestRunner: React.FC = () => {
     },
     {
       id: 'test-11',
-      name: 'Decompression Bomb Prevention (50MP Ceiling)',
+      name: 'High-Res Support & Decompression Bomb Prevention (135MP Ceiling)',
       category: 'security',
-      description: 'Tests that excessive decoded dimensions (>50MP or >12,000px axis) are strictly rejected before RAM allocation.',
+      description: 'Verifies 80MP high-res images are allowed while extreme buffers (>135MP or >16,384px axis) are rejected.',
       status: 'idle',
     },
     {
       id: 'test-12',
-      name: 'Hard 10 MB File Size Enforcement',
+      name: '70 MB Per-Image Upload Limit Enforcement',
       category: 'validation',
-      description: 'Ensures files exceeding the 10 MB limit are rejected immediately in both browser and server specifications.',
+      description: 'Ensures images up to 70 MB (including 20 MB and 70 MB) pass validation while files >70 MB (71 MB) are rejected.',
       status: 'idle',
     },
     {
@@ -482,32 +482,32 @@ export const QATestRunner: React.FC = () => {
     }
 
     // ---------------------------------------------
-    // TEST 11: Decompression Bomb Prevention
+    // TEST 11: High-Res & Decompression Bomb Prevention
     // ---------------------------------------------
     updateTest('test-11', { status: 'running' });
     const t11Start = performance.now();
     try {
-      // Test 1: Exceeds 50 MP (80 MP)
+      // Test 1: Large high-res photo (80 MP) should be ALLOWED
       const res80MP = validateDecodedDimensions(10000, 8000);
-      if (res80MP.valid) {
-        throw new Error('Failed to block 80 Megapixel decompression bomb');
+      if (!res80MP.valid) {
+        throw new Error('Incorrectly rejected legitimate 80 Megapixel high-res image: ' + res80MP.error);
       }
 
-      // Test 2: Exceeds single axis limit (> 12,000 px)
-      const resAxis = validateDecodedDimensions(14000, 1000);
+      // Test 2: Extreme decompression bomb (>135 MP) must be BLOCKED
+      const resExtremeMP = validateDecodedDimensions(12500, 12500);
+      if (resExtremeMP.valid) {
+        throw new Error('Failed to block 156.25 Megapixel decompression bomb');
+      }
+
+      // Test 3: Exceeds single axis limit (> 16,384 px) must be BLOCKED
+      const resAxis = validateDecodedDimensions(17000, 1000);
       if (resAxis.valid) {
-        throw new Error('Failed to block dimension exceeding 12,000px single-axis safety limit');
-      }
-
-      // Test 3: Valid safe dimension (12 MP)
-      const resSafe = validateDecodedDimensions(4000, 3000);
-      if (!resSafe.valid) {
-        throw new Error('Incorrectly rejected legitimate 12 MP image: ' + resSafe.error);
+        throw new Error('Failed to block dimension exceeding 16,384px single-axis canvas ceiling');
       }
 
       updateTest('test-11', {
         status: 'passed',
-        details: 'Successfully blocked 80MP buffer and 14,000px single-axis bomb; passed safe 12MP buffer.',
+        details: 'Allowed 80MP high-res image; blocked 156MP bomb and 17,000px single-axis overflow.',
         durationMs: Math.round(performance.now() - t11Start),
       });
     } catch (e: any) {
@@ -515,24 +515,37 @@ export const QATestRunner: React.FC = () => {
     }
 
     // ---------------------------------------------
-    // TEST 12: Hard 10 MB File Size Enforcement
+    // TEST 12: 70 MB Per-Image Upload Limit Enforcement
     // ---------------------------------------------
     updateTest('test-12', { status: 'running' });
     const t12Start = performance.now();
     try {
-      // Create simulated oversized File (11 MB)
-      const fakeBlob = new Blob([new Uint8Array(100)]);
-      const oversizedFile = new File([fakeBlob], 'huge.jpg', { type: 'image/jpeg' });
-      Object.defineProperty(oversizedFile, 'size', { value: 11 * 1024 * 1024, configurable: true });
+      const jpegHeader = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
 
-      const check = await validateImageFile(oversizedFile);
-      if (check.valid) {
-        throw new Error('Failed to block file exceeding 10MB limit');
+      const file20MB = new File([jpegHeader], 'large-20mb.jpg', { type: 'image/jpeg' });
+      Object.defineProperty(file20MB, 'size', { value: 20 * 1024 * 1024, configurable: true });
+      const check20 = await validateImageFile(file20MB);
+      if (!check20.valid) {
+        throw new Error('Incorrectly rejected valid 20 MB image: ' + check20.error);
+      }
+
+      const file70MB = new File([jpegHeader], 'max-70mb.jpg', { type: 'image/jpeg' });
+      Object.defineProperty(file70MB, 'size', { value: 70 * 1024 * 1024, configurable: true });
+      const check70 = await validateImageFile(file70MB);
+      if (!check70.valid) {
+        throw new Error('Incorrectly rejected valid 70 MB image: ' + check70.error);
+      }
+
+      const file71MB = new File([jpegHeader], 'oversized-71mb.jpg', { type: 'image/jpeg' });
+      Object.defineProperty(file71MB, 'size', { value: 71 * 1024 * 1024, configurable: true });
+      const check71 = await validateImageFile(file71MB);
+      if (check71.valid) {
+        throw new Error('Failed to block file exceeding 70 MB limit');
       }
 
       updateTest('test-12', {
         status: 'passed',
-        details: `Rejected 11MB file with: "${check.error}". Cap set to strict 10MB in browser & server.`,
+        details: `Accepted 20 MB & 70 MB valid images; rejected 71 MB file with: "${check71.error}"`,
         durationMs: Math.round(performance.now() - t12Start),
       });
     } catch (e: any) {

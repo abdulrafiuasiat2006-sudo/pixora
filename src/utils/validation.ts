@@ -6,13 +6,46 @@ export interface ValidationResult {
   hasAlpha?: boolean;
 }
 
-// 10 MB per file limit enforced in both browser and server
-export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
-export const WARN_FILE_SIZE_BYTES = 8 * 1024 * 1024; // 8MB
+export interface DeviceResourceProfile {
+  isMobile: boolean;
+  deviceMemoryGB: number | null;
+  isLowMemory: boolean;
+  maxCanvasDimensionPx: number;
+  maxMegapixels: number;
+}
 
-// Decompression bomb protection: block tiny files that expand into gigantic in-memory buffers
-export const MAX_SINGLE_DIMENSION_PX = 12000; // 12,000 px max single axis
-export const MAX_MEGAPIXELS = 50; // 50 Megapixels max (50,000,000 pixels)
+// 70 MB per image limit enforced across upload, validation, and client-side processing
+export const MAX_FILE_SIZE_MB = 70;
+export const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024; // 70 MB
+export const WARN_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB advisory threshold
+
+// High-resolution safety ceiling (allows large 50-70 MB images while blocking extreme decompression bombs)
+export const MAX_SINGLE_DIMENSION_PX = 16384; // Browser 2D canvas standard ceiling
+export const MAX_MEGAPIXELS = 135; // Up to 135 MP (~540 MB RGBA buffer)
+
+/**
+ * Inspects available browser/device hardware hints to adapt processing safely across mobile, tablet, and desktop.
+ */
+export function getDeviceResourceProfile(): DeviceResourceProfile {
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const rawMemory =
+    typeof navigator !== 'undefined' && typeof (navigator as any).deviceMemory === 'number'
+      ? ((navigator as any).deviceMemory as number)
+      : null;
+
+  const isLowMemory =
+    (rawMemory !== null && rawMemory <= 2) ||
+    (isMobile && rawMemory !== null && rawMemory <= 3);
+
+  return {
+    isMobile,
+    deviceMemoryGB: rawMemory,
+    isLowMemory,
+    maxCanvasDimensionPx: isLowMemory ? 12000 : MAX_SINGLE_DIMENSION_PX,
+    maxMegapixels: isLowMemory ? 85 : MAX_MEGAPIXELS,
+  };
+}
 
 /**
  * Sniffs the magic bytes in the initial file header to determine real MIME type.
@@ -60,57 +93,83 @@ export async function sniffMagicBytes(file: File): Promise<string | null> {
 }
 
 /**
- * Validates decoded image pixel dimensions to prevent decompression bombs.
+ * Validates decoded image pixel dimensions against browser canvas & device memory ceilings.
  */
 export function validateDecodedDimensions(width: number, height: number): ValidationResult {
   if (width <= 0 || height <= 0) {
     return { valid: false, error: 'Invalid or zero pixel dimensions.' };
   }
 
+  const profile = getDeviceResourceProfile();
+
   if (width > MAX_SINGLE_DIMENSION_PX || height > MAX_SINGLE_DIMENSION_PX) {
     return {
       valid: false,
-      error: `Image dimensions (${width}×${height}px) exceed the maximum allowed axis limit of ${MAX_SINGLE_DIMENSION_PX}px.`,
+      error: `Image dimensions (${width}×${height} px) exceed the browser canvas axis ceiling of ${MAX_SINGLE_DIMENSION_PX.toLocaleString()} px.`,
     };
   }
 
-  const megaPixels = (width * height) / 1000000;
+  const megaPixels = (width * height) / 1_000_000;
   if (megaPixels > MAX_MEGAPIXELS) {
     return {
       valid: false,
-      error: `Decompression Bomb Blocked: Image expands to ${megaPixels.toFixed(1)} MP, exceeding the 50 Megapixel memory safety ceiling.`,
+      error: `Image expands to ${megaPixels.toFixed(1)} MP, exceeding the ${MAX_MEGAPIXELS} Megapixel browser memory safety limit.`,
     };
   }
 
-  return { valid: true };
+  let warning: string | undefined;
+  if (profile.isMobile && megaPixels > 45) {
+    warning = `High-resolution image (${megaPixels.toFixed(1)} MP) detected on a mobile device. Processing may take a little longer depending on available device memory.`;
+  } else if (profile.isLowMemory && megaPixels > profile.maxMegapixels * 0.7) {
+    warning = `Large image (${megaPixels.toFixed(1)} MP) detected on a device with limited memory. If processing fails, try resizing or using a desktop browser.`;
+  }
+
+  return { valid: true, warning };
 }
 
 /**
- * Detects whether an image has any pixels with alpha < 255.
+ * Detects whether an image has any pixels with alpha < 255 using a lightweight 200x200 sample.
  */
 export function checkCanvasAlpha(
-  canvas: HTMLCanvasElement,
-  ctx: CanvasRenderingContext2D
+  source: HTMLCanvasElement | HTMLImageElement | ImageBitmap,
+  _ctx?: CanvasRenderingContext2D
 ): boolean {
   try {
-    const sampleWidth = Math.min(canvas.width, 400);
-    const sampleHeight = Math.min(canvas.height, 400);
+    const srcW =
+      source instanceof HTMLCanvasElement
+        ? source.width
+        : source instanceof HTMLImageElement
+        ? source.naturalWidth || source.width
+        : source.width;
+    const srcH =
+      source instanceof HTMLCanvasElement
+        ? source.height
+        : source instanceof HTMLImageElement
+        ? source.naturalHeight || source.height
+        : source.height;
+
+    const sampleWidth = Math.max(1, Math.min(srcW, 200));
+    const sampleHeight = Math.max(1, Math.min(srcH, 200));
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = sampleWidth;
     tempCanvas.height = sampleHeight;
     const tempCtx = tempCanvas.getContext('2d');
     if (!tempCtx) return false;
 
-    tempCtx.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+    tempCtx.drawImage(source, 0, 0, sampleWidth, sampleHeight);
     const imgData = tempCtx.getImageData(0, 0, sampleWidth, sampleHeight);
     const data = imgData.data;
 
     // Check alpha byte (every 4th byte)
     for (let i = 3; i < data.length; i += 4) {
       if (data[i] < 250) {
+        tempCanvas.width = 0;
+        tempCanvas.height = 0;
         return true;
       }
     }
+    tempCanvas.width = 0;
+    tempCanvas.height = 0;
     return false;
   } catch {
     return false;
@@ -118,22 +177,24 @@ export function checkCanvasAlpha(
 }
 
 /**
- * Full file and dimension validation before loading into workspace.
+ * Full file size and binary signature validation before loading into workspace.
  */
 export async function validateImageFile(file: File): Promise<ValidationResult> {
   if (!file) {
     return { valid: false, error: 'No file provided.' };
   }
 
-  // 1. File size check (Strict 10MB baseline)
+  // 1. File size check (70 MB limit)
   if (file.size <= 0) {
     return { valid: false, error: 'The selected file is empty (0 bytes).' };
   }
 
+  const sizeMB = file.size / (1024 * 1024);
+
   if (file.size > MAX_FILE_SIZE_BYTES) {
     return {
       valid: false,
-      error: `File exceeds maximum allowed size of 10MB (actual: ${(file.size / (1024 * 1024)).toFixed(2)}MB). Please choose a file under 10MB.`,
+      error: `This file is ${sizeMB.toFixed(2)} MB, which exceeds the ${MAX_FILE_SIZE_MB} MB per-image limit. Please select an image that is ${MAX_FILE_SIZE_MB} MB or smaller.`,
     };
   }
 
@@ -144,14 +205,17 @@ export async function validateImageFile(file: File): Promise<ValidationResult> {
   if (!detectedMime || !acceptedMimes.includes(detectedMime)) {
     return {
       valid: false,
-      error: `File signature rejected. Only authentic JPEG, PNG, and WebP images are allowed.`,
+      error: `Unsupported or unrecognized image format. Please choose a valid JPEG, PNG, or WebP image.`,
       detectedMime: detectedMime || 'unknown',
     };
   }
 
+  const profile = getDeviceResourceProfile();
   let warning: string | undefined;
-  if (file.size > WARN_FILE_SIZE_BYTES) {
-    warning = `File is close to the 10MB limit (${(file.size / (1024 * 1024)).toFixed(2)}MB).`;
+  if (profile.isMobile && file.size > 35 * 1024 * 1024) {
+    warning = `Large image (${sizeMB.toFixed(1)} MB) loaded on a mobile device. All processing runs locally and may take a few seconds.`;
+  } else if (file.size > WARN_FILE_SIZE_BYTES) {
+    warning = `Large image (${sizeMB.toFixed(1)} MB / ${MAX_FILE_SIZE_MB} MB max) loaded locally.`;
   }
 
   return {

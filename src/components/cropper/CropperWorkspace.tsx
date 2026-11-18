@@ -5,6 +5,7 @@ import {
   CropRect,
   CropAspectPreset,
   ImageFormat,
+  ProcessingProgress,
 } from '../../types';
 import { ImageDropzone } from '../common/ImageDropzone';
 import {
@@ -14,6 +15,8 @@ import {
   createFilesZipArchive,
   triggerDownload,
   formatBytes,
+  revokeObjectUrlSafe,
+  formatProcessingError,
 } from '../../utils/imageEngine';
 import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
@@ -29,6 +32,7 @@ import {
   Sliders,
   Move,
   ZoomIn,
+  AlertCircle,
 } from 'lucide-react';
 import { ProjectWorkspaceBar } from '../common/ProjectWorkspaceBar';
 import { ProjectPersistenceService } from '../../services/projectPersistenceService';
@@ -79,7 +83,10 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
 
   const [cropResult, setCropResult] = useState<CropResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState<number | null>(null);
 
   // References for dragging
   const containerRef = useRef<HTMLDivElement>(null);
@@ -88,8 +95,29 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
   const dragStartPos = useRef({ x: 0, y: 0 });
   const initialRectRef = useRef<CropRect>({ x: 0, y: 0, width: 0, height: 0 });
 
+  const replaceImageState = (next: ImageFileState | null) => {
+    setImageState((prev) => {
+      if (prev && prev.dataUrl !== next?.dataUrl) {
+        const oldUrl = prev.dataUrl;
+        setTimeout(() => revokeObjectUrlSafe(oldUrl), 250);
+      }
+      return next;
+    });
+  };
+
+  const replaceCropResult = (next: CropResult | null) => {
+    setCropResult((prev) => {
+      if (prev && prev.dataUrl !== next?.dataUrl) {
+        const oldUrl = prev.dataUrl;
+        setTimeout(() => revokeObjectUrlSafe(oldUrl), 250);
+      }
+      return next;
+    });
+  };
+
   const applyLoadedProject = (proj: FullWorkspaceProject) => {
     setCurrentProject(proj);
+    setProcessingError(null);
     if (proj.config && Object.keys(proj.config).length > 0) {
       if (proj.config.cropConfig) {
         setConfig((prev) => ({ ...prev, ...proj.config.cropConfig }));
@@ -101,13 +129,22 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
       }
     }
     if (proj.originalDataUrl) {
-      setImageState({
-        file: new File([], proj.originalFileName || 'image.jpg', {
-          type: proj.originalMimeType || 'image/jpeg',
-        }),
+      const restoredFile =
+        proj.originalBlob instanceof File
+          ? proj.originalBlob
+          : proj.originalBlob instanceof Blob
+          ? new File([proj.originalBlob], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            })
+          : new File([], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            });
+
+      replaceImageState({
+        file: restoredFile,
         dataUrl: proj.originalDataUrl,
         name: proj.originalFileName || 'Saved Image',
-        size: proj.originalSizeBytes || 0,
+        size: proj.originalSizeBytes || restoredFile.size || 0,
         width: proj.originalWidth || 0,
         height: proj.originalHeight || 0,
         type: proj.originalMimeType || 'image/jpeg',
@@ -140,6 +177,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
             'cropper',
             `Crop: ${initialImage.name}`
           );
+          proj.originalBlob = initialImage.file && initialImage.file.size > 0 ? initialImage.file : undefined;
           proj.originalDataUrl = initialImage.dataUrl;
           proj.originalFileName = initialImage.name;
           proj.originalSizeBytes = initialImage.size;
@@ -147,13 +185,12 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
           proj.originalHeight = initialImage.height;
           proj.originalMimeType = initialImage.type;
           proj.config = { cropConfig: config, cropRect };
-          proj.thumbnailUrl = initialImage.dataUrl;
           proj.status = 'draft';
 
           if (!isCancelled) {
             setCurrentProject(proj);
-            setImageState(initialImage);
-            ProjectPersistenceService.saveProject(proj, true)
+            replaceImageState(initialImage);
+            ProjectPersistenceService.saveProject(proj, false)
               .then((s) => {
                 if (!isCancelled) {
                   setCurrentProject(s);
@@ -170,7 +207,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
             applyLoadedProject(active);
           } else if (!isCancelled) {
             setCurrentProject(null);
-            setImageState(null);
+            replaceImageState(null);
           }
         }
       } catch (err) {
@@ -220,10 +257,13 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
             height: initH,
           });
         })
-        .catch((e) => console.error('Image load failed', e));
+        .catch((e) => {
+          console.error('Image load failed', e);
+          setProcessingError(formatProcessingError(e));
+        });
     } else {
       setLoadedImgElement(null);
-      setCropResult(null);
+      replaceCropResult(null);
     }
   }, [imageState]);
 
@@ -295,32 +335,52 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     }
   };
 
-  // Recompute cropped result
+  // Recompute cropped result (runs in Web Worker off main thread when File/Blob present)
   useEffect(() => {
-    if (!loadedImgElement) return;
+    if (!imageState) return;
+    const hasBlob = imageState.file && imageState.file.size > 0;
+    const source = hasBlob ? imageState.file : loadedImgElement;
+    if (!source) return;
 
+    const controller = new AbortController();
     let isMounted = true;
     setIsProcessing(true);
+    setProcessingError(null);
+    setProcessingProgress({ percent: 5, stage: 'Preparing local crop...' });
 
     const debounceTimer = setTimeout(() => {
-      cropImage(loadedImgElement, cropRect, config)
+      cropImage(source, cropRect, config, {
+        signal: controller.signal,
+        onProgress: (p) => {
+          if (isMounted) setProcessingProgress(p);
+        },
+      })
         .then((res) => {
           if (isMounted) {
-            setCropResult(res);
+            replaceCropResult(res);
             setIsProcessing(false);
+            setProcessingProgress(null);
+          } else {
+            revokeObjectUrlSafe(res.dataUrl);
           }
         })
-        .catch((e) => {
+        .catch((e: any) => {
+          if (e?.name === 'AbortError') return;
           console.error('Crop failed', e);
-          if (isMounted) setIsProcessing(false);
+          if (isMounted) {
+            setIsProcessing(false);
+            setProcessingProgress(null);
+            setProcessingError(formatProcessingError(e));
+          }
         });
     }, 120);
 
     return () => {
       isMounted = false;
       clearTimeout(debounceTimer);
+      controller.abort();
     };
-  }, [loadedImgElement, cropRect, config]);
+  }, [imageState, loadedImgElement, cropRect, config]);
 
   // Rotation controls
   const handleRotateCw = () => {
@@ -452,7 +512,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     window.addEventListener('pointerup', handlePointerUp);
   };
 
-  // Debounced auto-save
+  // Debounced auto-save (100% local IndexedDB + metadata)
   useEffect(() => {
     if (!currentProject || !imageState) return;
 
@@ -475,8 +535,8 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
           originalHeight: imageState.height,
           originalSizeBytes: imageState.size,
           originalMimeType: imageState.type,
+          originalBlob: imageState.file && imageState.file.size > 0 ? imageState.file : currentProject.originalBlob,
           originalDataUrl: imageState.dataUrl,
-          thumbnailUrl: cropResult?.dataUrl || imageState.dataUrl,
         };
 
         const saved = await ProjectPersistenceService.saveProject(updated, false);
@@ -498,6 +558,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
         ? { ...currentProject, title: `Crop: ${newImg.name}` }
         : ProjectPersistenceService.createNewProject(userId, 'cropper', `Crop: ${newImg.name}`);
 
+    proj.originalBlob = newImg.file && newImg.file.size > 0 ? newImg.file : undefined;
     proj.originalDataUrl = newImg.dataUrl;
     proj.originalFileName = newImg.name;
     proj.originalSizeBytes = newImg.size;
@@ -505,14 +566,14 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     proj.originalHeight = newImg.height;
     proj.originalMimeType = newImg.type;
     proj.config = { cropConfig: config, cropRect };
-    proj.thumbnailUrl = newImg.dataUrl;
     proj.status = 'draft';
 
+    setProcessingError(null);
     setCurrentProject(proj);
-    setImageState(newImg);
+    replaceImageState(newImg);
     setSaveStatus('saving');
 
-    ProjectPersistenceService.saveProject(proj, true)
+    ProjectPersistenceService.saveProject(proj, false)
       .then((saved) => {
         setCurrentProject(saved);
         setSaveStatus('saved');
@@ -550,10 +611,12 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
 
   const handleClearProject = async () => {
     await ProjectPersistenceService.setActiveProject(userId, 'cropper', null);
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setCropResult(null);
+    replaceCropResult(null);
     setCurrentProject(null);
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -577,10 +640,12 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
     }
     await ProjectPersistenceService.setActiveProject(userId, 'cropper', null);
 
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setCropResult(null);
+    replaceCropResult(null);
     setCurrentProject(null);
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -595,6 +660,8 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
   const handleDownloadZip = async () => {
     if (!cropResult || !imageState) return;
     setIsZipping(true);
+    setZipProgress(0);
+    setProcessingError(null);
     try {
       const baseName = imageState.name.replace(/\.[^/.]+$/, '');
       const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
@@ -609,14 +676,17 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
           },
         ],
         'PIXORA — Image Cropper Export Manifest',
-        `Crop preset: ${config.aspectPreset.toUpperCase()} | Dimensions: ${cropResult.width}x${cropResult.height} px | Rotation: ${config.rotation}°`
+        `Crop preset: ${config.aspectPreset.toUpperCase()} | Dimensions: ${cropResult.width}x${cropResult.height} px | Rotation: ${config.rotation}°`,
+        (pct) => setZipProgress(pct)
       );
       triggerDownload(zipBlob, `${baseName}-cropped.zip`);
       await completeAndClearWorkspace();
     } catch (err) {
       console.error('ZIP creation failed:', err);
+      setProcessingError(formatProcessingError(err));
     } finally {
       setIsZipping(false);
+      setZipProgress(null);
     }
   };
 
@@ -749,7 +819,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
             isProcessing={isProcessing}
             isZipping={isZipping}
             individualMeta={cropResult ? `${cropResult.width}×${cropResult.height}` : undefined}
-            zipMeta=".zip"
+            zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
           />
 
           <button
@@ -899,6 +969,19 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
               </div>
             </div>
 
+            {processingError && (
+              <div
+                role="alert"
+                className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2.5 text-xs text-red-900"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-bold block">Local Processing Notice</span>
+                  <span>{processingError}</span>
+                </div>
+              </div>
+            )}
+
             {/* LIVE CROPPED RESULT PREVIEW */}
             {cropResult && (
               <div className="border-t border-[#171717]/10 pt-4 flex flex-col sm:flex-row items-center gap-4">
@@ -916,6 +999,12 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
                     <div>Bytes: {formatBytes(cropResult.sizeBytes)}</div>
                     <div>Format: {config.format.split('/')[1].toUpperCase()}</div>
                   </div>
+                  {isProcessing && processingProgress && (
+                    <div className="mt-2 flex items-center gap-2 text-[11px] font-mono text-[#171717]/70">
+                      <span>{processingProgress.stage}</span>
+                      <span>({processingProgress.percent}%)</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1081,7 +1170,7 @@ export const CropperWorkspace: React.FC<CropperWorkspaceProps> = ({
                 isProcessing={isProcessing}
                 isZipping={isZipping}
                 individualMeta={cropResult ? `${cropResult.width}×${cropResult.height}` : undefined}
-                zipMeta=".zip"
+                zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
               />
             </div>
           </div>

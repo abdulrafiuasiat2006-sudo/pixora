@@ -140,9 +140,15 @@ export interface SavedProject {
   hasStoredFile?: boolean;
 }
 
+export interface ProcessingProgress {
+  percent: number;
+  stage: string;
+}
+
 export interface FullWorkspaceProject extends SavedProject {
   userId: string;
   originalDataUrl?: string;
+  originalBlob?: Blob;
   resultsData?: any;
 }
 

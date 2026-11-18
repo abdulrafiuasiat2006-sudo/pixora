@@ -3,6 +3,7 @@ import {
   ImageFileState,
   ResizeConfig,
   ImageFormat,
+  ProcessingProgress,
 } from '../../types';
 import { ImageDropzone } from '../common/ImageDropzone';
 import {
@@ -12,6 +13,8 @@ import {
   createFilesZipArchive,
   triggerDownload,
   formatBytes,
+  revokeObjectUrlSafe,
+  formatProcessingError,
 } from '../../utils/imageEngine';
 import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
@@ -67,22 +70,55 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
 
   const [result, setResult] = useState<ResizeResult | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState<number | null>(null);
   const [dimensionWarning, setDimensionWarning] = useState<string | null>(null);
+
+  const replaceImageState = (next: ImageFileState | null) => {
+    setImageState((prev) => {
+      if (prev && prev.dataUrl !== next?.dataUrl) {
+        const oldUrl = prev.dataUrl;
+        setTimeout(() => revokeObjectUrlSafe(oldUrl), 250);
+      }
+      return next;
+    });
+  };
+
+  const replaceResult = (next: ResizeResult | null) => {
+    setResult((prev) => {
+      if (prev && prev.dataUrl !== next?.dataUrl) {
+        const oldUrl = prev.dataUrl;
+        setTimeout(() => revokeObjectUrlSafe(oldUrl), 250);
+      }
+      return next;
+    });
+  };
 
   const applyLoadedProject = (proj: FullWorkspaceProject) => {
     setCurrentProject(proj);
+    setProcessingError(null);
     if (proj.config && Object.keys(proj.config).length > 0) {
       setConfig((prev) => ({ ...prev, ...proj.config }));
     }
     if (proj.originalDataUrl) {
-      setImageState({
-        file: new File([], proj.originalFileName || 'image.jpg', {
-          type: proj.originalMimeType || 'image/jpeg',
-        }),
+      const restoredFile =
+        proj.originalBlob instanceof File
+          ? proj.originalBlob
+          : proj.originalBlob instanceof Blob
+          ? new File([proj.originalBlob], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            })
+          : new File([], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            });
+
+      replaceImageState({
+        file: restoredFile,
         dataUrl: proj.originalDataUrl,
         name: proj.originalFileName || 'Saved Image',
-        size: proj.originalSizeBytes || 0,
+        size: proj.originalSizeBytes || restoredFile.size || 0,
         width: proj.originalWidth || 0,
         height: proj.originalHeight || 0,
         type: proj.originalMimeType || 'image/jpeg',
@@ -115,6 +151,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
             'resizer',
             `Resize: ${initialImage.name}`
           );
+          proj.originalBlob = initialImage.file && initialImage.file.size > 0 ? initialImage.file : undefined;
           proj.originalDataUrl = initialImage.dataUrl;
           proj.originalFileName = initialImage.name;
           proj.originalSizeBytes = initialImage.size;
@@ -122,13 +159,12 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
           proj.originalHeight = initialImage.height;
           proj.originalMimeType = initialImage.type;
           proj.config = config;
-          proj.thumbnailUrl = initialImage.dataUrl;
           proj.status = 'draft';
 
           if (!isCancelled) {
             setCurrentProject(proj);
-            setImageState(initialImage);
-            ProjectPersistenceService.saveProject(proj, true)
+            replaceImageState(initialImage);
+            ProjectPersistenceService.saveProject(proj, false)
               .then((s) => {
                 if (!isCancelled) {
                   setCurrentProject(s);
@@ -145,7 +181,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
             applyLoadedProject(active);
           } else if (!isCancelled) {
             setCurrentProject(null);
-            setImageState(null);
+            replaceImageState(null);
           }
         }
       } catch (err) {
@@ -193,16 +229,22 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
             fileName: imageState.name.replace(/\.[^/.]+$/, '') + '-resized',
           }));
         })
-        .catch((e) => console.error('Failed to load image element', e));
+        .catch((e) => {
+          console.error('Failed to load image element', e);
+          setProcessingError(formatProcessingError(e));
+        });
     } else {
       setLoadedImgElement(null);
-      setResult(null);
+      replaceResult(null);
     }
   }, [imageState]);
 
-  // Execute resizing
+  // Execute resizing (runs in Web Worker off main thread when File/Blob present)
   useEffect(() => {
-    if (!loadedImgElement) return;
+    if (!imageState) return;
+    const hasBlob = imageState.file && imageState.file.size > 0;
+    const source = hasBlob ? imageState.file : loadedImgElement;
+    if (!source) return;
 
     if (config.width > 8192 || config.height > 8192) {
       setDimensionWarning('Caution: Dimensions exceed 8192px. Large canvas sizes may cause memory strain on mobile devices.');
@@ -210,30 +252,47 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
       setDimensionWarning(null);
     }
 
+    const controller = new AbortController();
     let isMounted = true;
     setIsProcessing(true);
+    setProcessingError(null);
+    setProcessingProgress({ percent: 5, stage: 'Preparing local resize...' });
 
     const debounceTimer = setTimeout(() => {
-      resizeImage(loadedImgElement, config)
+      resizeImage(source, config, {
+        signal: controller.signal,
+        onProgress: (p) => {
+          if (isMounted) setProcessingProgress(p);
+        },
+      })
         .then((res) => {
           if (isMounted) {
-            setResult(res);
+            replaceResult(res);
             setIsProcessing(false);
+            setProcessingProgress(null);
+          } else {
+            revokeObjectUrlSafe(res.dataUrl);
           }
         })
-        .catch((e) => {
+        .catch((e: any) => {
+          if (e?.name === 'AbortError') return;
           console.error('Resize failed', e);
-          if (isMounted) setIsProcessing(false);
+          if (isMounted) {
+            setIsProcessing(false);
+            setProcessingProgress(null);
+            setProcessingError(formatProcessingError(e));
+          }
         });
     }, 150);
 
     return () => {
       isMounted = false;
       clearTimeout(debounceTimer);
+      controller.abort();
     };
-  }, [loadedImgElement, config.width, config.height, config.format, config.quality]);
+  }, [imageState, loadedImgElement, config.width, config.height, config.format, config.quality]);
 
-  // Debounced auto-save
+  // Debounced auto-save (100% local IndexedDB + metadata)
   useEffect(() => {
     if (!currentProject || !imageState) return;
 
@@ -255,8 +314,8 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
           originalHeight: imageState.height,
           originalSizeBytes: imageState.size,
           originalMimeType: imageState.type,
+          originalBlob: imageState.file && imageState.file.size > 0 ? imageState.file : currentProject.originalBlob,
           originalDataUrl: imageState.dataUrl,
-          thumbnailUrl: result?.dataUrl || imageState.dataUrl,
         };
 
         const saved = await ProjectPersistenceService.saveProject(updated, false);
@@ -278,6 +337,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
         ? { ...currentProject, title: `Resize: ${newImg.name}` }
         : ProjectPersistenceService.createNewProject(userId, 'resizer', `Resize: ${newImg.name}`);
 
+    proj.originalBlob = newImg.file && newImg.file.size > 0 ? newImg.file : undefined;
     proj.originalDataUrl = newImg.dataUrl;
     proj.originalFileName = newImg.name;
     proj.originalSizeBytes = newImg.size;
@@ -285,14 +345,14 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
     proj.originalHeight = newImg.height;
     proj.originalMimeType = newImg.type;
     proj.config = config;
-    proj.thumbnailUrl = newImg.dataUrl;
     proj.status = 'draft';
 
+    setProcessingError(null);
     setCurrentProject(proj);
-    setImageState(newImg);
+    replaceImageState(newImg);
     setSaveStatus('saving');
 
-    ProjectPersistenceService.saveProject(proj, true)
+    ProjectPersistenceService.saveProject(proj, false)
       .then((saved) => {
         setCurrentProject(saved);
         setSaveStatus('saved');
@@ -330,10 +390,12 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
 
   const handleClearProject = async () => {
     await ProjectPersistenceService.setActiveProject(userId, 'resizer', null);
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setResult(null);
+    replaceResult(null);
     setCurrentProject(null);
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -366,10 +428,12 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
   };
 
   const handleScalePercent = (percent: number) => {
-    if (!loadedImgElement) return;
+    const srcW = imageState?.width || loadedImgElement?.naturalWidth;
+    const srcH = imageState?.height || loadedImgElement?.naturalHeight;
+    if (!srcW || !srcH) return;
     const factor = percent / 100;
-    const newW = Math.round(loadedImgElement.naturalWidth * factor);
-    const newH = Math.round(loadedImgElement.naturalHeight * factor);
+    const newW = Math.round(srcW * factor);
+    const newH = Math.round(srcH * factor);
     setConfig({ ...config, width: newW, height: newH });
   };
 
@@ -385,10 +449,12 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
     }
     await ProjectPersistenceService.setActiveProject(userId, 'resizer', null);
 
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setResult(null);
+    replaceResult(null);
     setCurrentProject(null);
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -402,6 +468,8 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
   const handleDownloadZip = async () => {
     if (!result || !imageState) return;
     setIsZipping(true);
+    setZipProgress(0);
+    setProcessingError(null);
     try {
       const ext = config.format.split('/')[1] === 'jpeg' ? 'jpg' : config.format.split('/')[1];
       const baseName = config.fileName || 'pixora-resized';
@@ -416,14 +484,17 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
           },
         ],
         'PIXORA — Image Resizer Export Manifest',
-        `Original dimensions: ${result.originalWidth}x${result.originalHeight} px | Resized dimensions: ${result.width}x${result.height} px`
+        `Original dimensions: ${result.originalWidth}x${result.originalHeight} px | Resized dimensions: ${result.width}x${result.height} px`,
+        (pct) => setZipProgress(pct)
       );
       triggerDownload(zipBlob, `${baseName}.zip`);
       await completeAndClearWorkspace();
     } catch (err) {
       console.error('ZIP creation failed:', err);
+      setProcessingError(formatProcessingError(err));
     } finally {
       setIsZipping(false);
+      setZipProgress(null);
     }
   };
 
@@ -542,7 +613,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
             isProcessing={isProcessing}
             isZipping={isZipping}
             individualMeta={result ? formatBytes(result.sizeBytes) : undefined}
-            zipMeta=".zip"
+            zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
           />
 
           <button
@@ -569,11 +640,32 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
               </span>
             </div>
 
+            {processingError && (
+              <div
+                role="alert"
+                className="mb-4 p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2.5 text-xs text-red-900"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-bold block">Local Processing Notice</span>
+                  <span>{processingError}</span>
+                </div>
+              </div>
+            )}
+
             <div className="relative min-h-[280px] xs:min-h-[340px] sm:min-h-[400px] max-h-[560px] bg-[#171717]/5 rounded-xl border border-[#171717]/10 overflow-hidden flex items-center justify-center p-3">
               {isProcessing && (
-                <div className="absolute inset-0 z-30 bg-white/70 backdrop-blur-xs flex flex-col items-center justify-center text-xs font-mono text-[#171717] gap-2 p-4 text-center">
+                <div className="absolute inset-0 z-30 bg-white/80 backdrop-blur-xs flex flex-col items-center justify-center text-xs font-mono text-[#171717] gap-3 p-4 text-center">
                   <span className="w-6 h-6 border-2 border-[#FF6B35] border-t-transparent rounded-full animate-spin" />
-                  <span>Resampling canvas pixels...</span>
+                  <span>{processingProgress?.stage || 'Resampling canvas pixels locally...'}</span>
+                  {processingProgress && (
+                    <div className="w-56 h-1.5 bg-[#171717]/10 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-[#FF6B35] transition-all duration-150"
+                        style={{ width: `${Math.min(100, Math.max(5, processingProgress.percent))}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -801,7 +893,7 @@ export const ResizerWorkspace: React.FC<ResizerWorkspaceProps> = ({
                 isProcessing={isProcessing}
                 isZipping={isZipping}
                 individualMeta={result ? formatBytes(result.sizeBytes) : undefined}
-                zipMeta=".zip"
+                zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
               />
             </div>
           </div>

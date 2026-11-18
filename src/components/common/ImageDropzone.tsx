@@ -1,8 +1,12 @@
 import React, { useRef, useState } from 'react';
-import { Upload, AlertCircle, Image as ImageIcon, Sparkles } from 'lucide-react';
+import { Upload, AlertCircle } from 'lucide-react';
 import { ImageFileState } from '../../types';
-import { validateImageFile, validateDecodedDimensions } from '../../utils/validation';
-import { formatBytes } from '../../utils/imageEngine';
+import {
+  MAX_FILE_SIZE_MB,
+  validateImageFile,
+  validateDecodedDimensions,
+} from '../../utils/validation';
+import { formatBytes, revokeObjectUrlSafe, yieldToMain } from '../../utils/imageEngine';
 
 interface ImageDropzoneProps {
   onImageLoaded: (imageState: ImageFileState) => void;
@@ -14,7 +18,7 @@ interface ImageDropzoneProps {
 export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
   onImageLoaded,
   title = 'Upload or drop an image',
-  subtitle = 'Supports JPEG, PNG, WebP up to 10MB. Processed 100% locally on your device.',
+  subtitle = `Supports JPEG, PNG, WebP up to ${MAX_FILE_SIZE_MB} MB. Processed 100% locally on your device.`,
   compact = false,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -22,17 +26,50 @@ export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingStage, setLoadingStage] = useState<string | null>(null);
+
+  const readDecodedDimensions = async (
+    file: File,
+    objectUrl: string
+  ): Promise<{ width: number; height: number }> => {
+    // Prefer lightweight header/bitmap probe where available, with Image fallback
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bitmap = await createImageBitmap(file);
+        const dims = { width: bitmap.width, height: bitmap.height };
+        bitmap.close();
+        return dims;
+      } catch {
+        // Fall through to HTMLImageElement decode check
+      }
+    }
+
+    return await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      };
+      img.onerror = () => {
+        reject(new Error('Could not decode image pixels. The file might be corrupted or unsupported on this browser.'));
+      };
+      img.src = objectUrl;
+    });
+  };
 
   const processFile = async (file: File) => {
     setErrorMessage(null);
     setWarningMessage(null);
     setLoading(true);
+    setLoadingStage(`Checking ${formatBytes(file.size)} local file...`);
 
+    let objectUrl: string | null = null;
     try {
+      await yieldToMain();
       const validation = await validateImageFile(file);
       if (!validation.valid) {
         setErrorMessage(validation.error || 'Invalid image file.');
         setLoading(false);
+        setLoadingStage(null);
         return;
       }
 
@@ -40,44 +77,55 @@ export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
         setWarningMessage(validation.warning);
       }
 
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const img = new Image();
-        img.onload = () => {
-          // Decompression bomb check (max 50 Megapixels & max 12000px axis)
-          const dimCheck = validateDecodedDimensions(img.naturalWidth, img.naturalHeight);
-          if (!dimCheck.valid) {
-            setErrorMessage(dimCheck.error || 'Image dimension safety check failed.');
-            setLoading(false);
-            return;
-          }
+      setLoadingStage('Inspecting image dimensions locally...');
+      await yieldToMain();
 
-          onImageLoaded({
-            file,
-            dataUrl,
-            name: file.name,
-            size: file.size,
-            width: img.naturalWidth,
-            height: img.naturalHeight,
-            type: validation.detectedMime || file.type,
-          });
-          setLoading(false);
-        };
-        img.onerror = () => {
-          setErrorMessage('Could not decode image pixels. File might be corrupted.');
-          setLoading(false);
-        };
-        img.src = dataUrl;
-      };
-      reader.onerror = () => {
-        setErrorMessage('Failed to read file from storage.');
+      // Use zero-copy Object URL instead of FileReader.readAsDataURL so 70 MB files never bloat JS heap
+      objectUrl = URL.createObjectURL(file);
+      const { width, height } = await readDecodedDimensions(file, objectUrl);
+
+      const dimCheck = validateDecodedDimensions(width, height);
+      if (!dimCheck.valid) {
+        revokeObjectUrlSafe(objectUrl);
+        objectUrl = null;
+        setErrorMessage(dimCheck.error || 'Image dimension safety check failed.');
         setLoading(false);
-      };
-      reader.readAsDataURL(file);
+        setLoadingStage(null);
+        return;
+      }
+
+      if (dimCheck.warning) {
+        setWarningMessage((prev) => (prev ? `${prev} ${dimCheck.warning}` : dimCheck.warning!));
+      }
+
+      const loadedUrl = objectUrl;
+      objectUrl = null; // Ownership transferred to parent workspace
+
+      onImageLoaded({
+        file,
+        dataUrl: loadedUrl,
+        name: file.name,
+        size: file.size,
+        width,
+        height,
+        type: validation.detectedMime || file.type || 'image/jpeg',
+      });
     } catch (err: any) {
-      setErrorMessage(err.message || 'An unexpected error occurred during upload.');
+      revokeObjectUrlSafe(objectUrl);
+      const rawMsg = String(err?.message || '');
+      if (rawMsg.toLowerCase().includes('memory') || rawMsg.toLowerCase().includes('allocation')) {
+        setErrorMessage(
+          'Your device ran out of browser memory while decoding this large image. Try closing other tabs or using a smaller resolution.'
+        );
+      } else {
+        setErrorMessage(rawMsg || 'An unexpected error occurred while reading the local image.');
+      }
+    } finally {
       setLoading(false);
+      setLoadingStage(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -105,72 +153,13 @@ export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
     }
   };
 
-  /**
-   * Generates a high-resolution crisp test image on a local canvas for instant testing.
-   */
-  const loadSampleImage = (type: 'photo' | 'graphic' = 'photo') => {
-    setLoading(true);
-    setErrorMessage(null);
-
-    const canvas = document.createElement('canvas');
-    canvas.width = 2400;
-    canvas.height = 1600;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Draw rich crisp scene with geometry, text, and color zones
-    ctx.fillStyle = '#171717';
-    ctx.fillRect(0, 0, 2400, 1600);
-
-    // Dynamic graphic blocks
-    ctx.fillStyle = '#FF6B35';
-    ctx.fillRect(100, 100, 1000, 1400);
-
-    ctx.fillStyle = '#F7F5F0';
-    ctx.fillRect(1150, 100, 1150, 680);
-
-    ctx.fillStyle = '#2A2A2A';
-    ctx.fillRect(1150, 820, 1150, 680);
-
-    // Decorative geometric patterns for split testing
-    ctx.strokeStyle = '#F7F5F0';
-    ctx.lineWidth = 12;
-    for (let i = 0; i < 5; i++) {
-      ctx.strokeRect(180 + i * 60, 200 + i * 60, 840 - i * 120, 1200 - i * 120);
-    }
-
-    // High resolution text
-    ctx.fillStyle = '#171717';
-    ctx.font = 'bold 72px Inter, sans-serif';
-    ctx.fillText('PIXORA HIGH-RES SAMPLE', 1220, 320);
-
-    ctx.font = '36px "DM Mono", monospace';
-    ctx.fillStyle = '#171717';
-    ctx.fillText('2400 × 1600 px · RGB 24-bit Canvas', 1220, 400);
-    ctx.fillText('Grid & Carousel Benchmark Specimen', 1220, 460);
-
-    // Bottom dark block text
-    ctx.fillStyle = '#F7F5F0';
-    ctx.font = '40px Inter, sans-serif';
-    ctx.fillText('Zero-loss Remainder Distribution Test', 1220, 1000);
-    ctx.fillStyle = '#FF6B35';
-    ctx.fillText('Precision Tile Math Verification', 1220, 1080);
-
-    canvas.toBlob((blob) => {
-      if (blob) {
-        const file = new File([blob], 'pixora-test-specimen.jpg', { type: 'image/jpeg' });
-        processFile(file);
-      }
-    }, 'image/jpeg', 0.95);
-  };
-
   return (
     <div className="w-full">
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !loading && fileInputRef.current?.click()}
         className={`group relative border-2 border-dashed rounded-xl cursor-pointer transition-colors text-center ${
           isDragging
             ? 'border-[#FF6B35] bg-[#FF6B35]/5'
@@ -196,20 +185,26 @@ export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
           </div>
 
           <div className="max-w-md">
-            <h3 className="text-base font-semibold text-[#171717]">{title}</h3>
+            <h3 className="text-base font-semibold text-[#171717]">
+              {loading && loadingStage ? loadingStage : title}
+            </h3>
             <p className="mt-1 text-xs text-[#171717]/65">{subtitle}</p>
+            <p className="mt-1 text-[11px] font-mono text-[#171717]/50">
+              Max {MAX_FILE_SIZE_MB} MB per image · 100% client-side on your device
+            </p>
           </div>
 
           <div className="flex items-center gap-2 pt-2">
             <button
               type="button"
+              disabled={loading}
               onClick={(e) => {
                 e.stopPropagation();
                 fileInputRef.current?.click();
               }}
-              className="px-4 py-2 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors whitespace-nowrap"
+              className="px-4 py-2 text-xs font-semibold text-white bg-[#171717] hover:bg-[#171717]/90 rounded-md transition-colors whitespace-nowrap disabled:opacity-60"
             >
-              Choose Image File
+              {loading ? 'Reading Local File...' : 'Choose Image File'}
             </button>
           </div>
         </div>
@@ -217,15 +212,18 @@ export const ImageDropzone: React.FC<ImageDropzoneProps> = ({
 
       {/* Validation Error Message */}
       {errorMessage && (
-        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-xs text-red-800">
+        <div
+          role="alert"
+          className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2.5 text-xs text-red-800"
+        >
           <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
           <div>
-            <span className="font-semibold">Validation Error:</span> {errorMessage}
+            <span className="font-semibold">Upload Rejected:</span> {errorMessage}
           </div>
         </div>
       )}
 
-        {/* Validation Warning Message */}
+      {/* Validation Warning Message */}
       {warningMessage && (
         <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5 text-xs text-amber-800">
           <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 mt-0.5" />

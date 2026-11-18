@@ -910,7 +910,6 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
       configSummary,
       status,
       config,
-      thumbnailDataUrl,
       hasStoredFile,
     } = req.body;
 
@@ -940,7 +939,6 @@ app.post('/api/user/projects', requireAuth, (req: AuthenticatedRequest, res: Res
       config: config || {},
       createdAt: existingIndex >= 0 ? projects[existingIndex].createdAt : now,
       updatedAt: now,
-      thumbnailDataUrl: thumbnailDataUrl || undefined,
       hasStoredFile: Boolean(hasStoredFile),
     };
 
@@ -981,7 +979,6 @@ app.put('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: 
       configSummary,
       status,
       exportCount,
-      thumbnailDataUrl,
       originalWidth,
       originalHeight,
       originalSizeBytes,
@@ -1004,7 +1001,6 @@ app.put('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, res: 
     if (configSummary !== undefined) project.configSummary = sanitizeString(configSummary);
     if (status !== undefined) project.status = status;
     if (exportCount !== undefined) project.exportCount = Number(exportCount) || 1;
-    if (thumbnailDataUrl !== undefined) project.thumbnailDataUrl = thumbnailDataUrl;
     if (originalWidth !== undefined) project.originalWidth = Number(originalWidth) || project.originalWidth;
     if (originalHeight !== undefined) project.originalHeight = Number(originalHeight) || project.originalHeight;
     if (originalSizeBytes !== undefined) project.originalSizeBytes = Number(originalSizeBytes) || project.originalSizeBytes;
@@ -1068,70 +1064,11 @@ app.delete('/api/user/projects/:id', requireAuth, (req: AuthenticatedRequest, re
   return res.status(200).json({ success: true, message: 'Project deleted successfully.' });
 });
 
-// Upload and retain project file
-app.post('/api/user/projects/:id/file', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { dataUrl, fileName } = req.body;
-
-    if (!dataUrl || typeof dataUrl !== 'string') {
-      return res.status(400).json({ error: 'Missing file payload.' });
-    }
-
-    const projects = loadProjects();
-    const project = projects.find((p) => p.id === id);
-
-    if (!project) {
-      return res.status(404).json({ error: 'Project not found.' });
-    }
-
-    if (project.userId !== req.user!.userId) {
-      return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
-    }
-
-    const matches = dataUrl.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
-    if (!matches || matches.length !== 3) {
-      return res.status(400).json({ error: 'Invalid data URL format.' });
-    }
-
-    const buffer = Buffer.from(matches[2], 'base64');
-    if (buffer.length > 10 * 1024 * 1024) {
-      return res.status(413).json({ error: 'File size exceeds maximum 10MB limit.' });
-    }
-
-    const check = validateImageBuffer(buffer);
-    if (!check.valid) {
-      return res.status(400).json({ error: 'Unsupported file type. Allowed: JPEG, PNG, WebP.' });
-    }
-
-    const userDir = path.join(FILES_DIR, req.user!.userId);
-    const projectDir = path.join(userDir, id);
-    if (!fs.existsSync(projectDir)) {
-      fs.mkdirSync(projectDir, { recursive: true });
-    }
-
-    const filePath = path.join(projectDir, 'original.bin');
-    fs.writeFileSync(filePath, buffer);
-
-    project.hasStoredFile = true;
-    project.originalMimeType = check.mime;
-    if (fileName) {
-      project.originalFileName = sanitizeString(fileName);
-    }
-    project.originalSizeBytes = buffer.length;
-    project.updatedAt = Date.now();
-    saveProjects(projects);
-
-    return res.status(200).json({
-      success: true,
-      sizeBytes: buffer.length,
-      mimeType: check.mime,
-      fileName: project.originalFileName,
-    });
-  } catch (error) {
-    console.error('[SERVER ERROR in POST /api/user/projects/:id/file]:', error);
-    return res.status(500).json({ error: 'Failed to store project file.' });
-  }
+// Server-side image file storage is disabled: all image uploads and processing run 100% client-side
+app.post('/api/user/projects/:id/file', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+  return res.status(410).json({
+    error: 'Client-side only: Image files are processed locally on your device and are never uploaded to external servers.',
+  });
 });
 
 // Retrieve project file securely
@@ -1228,7 +1165,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
     security: {
       https_enforced: isProd,
       client_side_processing_guarantee: true,
-      max_upload_cap_mb: 10,
+      max_upload_cap_mb: 70,
       progressive_lockout_active: true,
     },
   });

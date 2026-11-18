@@ -5,6 +5,7 @@ import {
   SplitTile,
   ImageFormat,
   SplitMode,
+  ProcessingProgress,
 } from '../../types';
 import { ImageDropzone } from '../common/ImageDropzone';
 import {
@@ -13,6 +14,8 @@ import {
   createZipArchive,
   triggerDownload,
   formatBytes,
+  revokeObjectUrlSafe,
+  formatProcessingError,
 } from '../../utils/imageEngine';
 import { DownloadOptions } from '../common/DownloadOptions';
 import { StorageService } from '../../services/storageService';
@@ -80,7 +83,10 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
   const [tiles, setTiles] = useState<SplitTile[]>([]);
   const [downloadedTileIndices, setDownloadedTileIndices] = useState<Set<number>>(new Set());
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
   const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState<number | null>(null);
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
   const [showIndividualFilesModal, setShowIndividualFilesModal] = useState(false);
   const [selectedTilePreview, setSelectedTilePreview] = useState<SplitTile | null>(null);
@@ -88,19 +94,46 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
   const [previewView, setPreviewView] = useState<'assembled' | 'tiles' | 'carousel'>('assembled');
   const [carouselActiveSlide, setCarouselActiveSlide] = useState(0);
 
+  const revokeTileUrls = (oldTiles: SplitTile[]) => {
+    if (oldTiles.length === 0) return;
+    setTimeout(() => {
+      oldTiles.forEach((t) => revokeObjectUrlSafe(t.dataUrl));
+    }, 250);
+  };
+
+  const replaceImageState = (next: ImageFileState | null) => {
+    setImageState((prev) => {
+      if (prev && prev.dataUrl !== next?.dataUrl) {
+        const oldUrl = prev.dataUrl;
+        setTimeout(() => revokeObjectUrlSafe(oldUrl), 250);
+      }
+      return next;
+    });
+  };
+
   const applyLoadedProject = (proj: FullWorkspaceProject) => {
     setCurrentProject(proj);
+    setProcessingError(null);
     if (proj.config && Object.keys(proj.config).length > 0) {
       setConfig((prev) => ({ ...prev, ...proj.config }));
     }
     if (proj.originalDataUrl) {
-      setImageState({
-        file: new File([], proj.originalFileName || 'image.jpg', {
-          type: proj.originalMimeType || 'image/jpeg',
-        }),
+      const restoredFile =
+        proj.originalBlob instanceof File
+          ? proj.originalBlob
+          : proj.originalBlob instanceof Blob
+          ? new File([proj.originalBlob], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            })
+          : new File([], proj.originalFileName || 'image.jpg', {
+              type: proj.originalMimeType || 'image/jpeg',
+            });
+
+      replaceImageState({
+        file: restoredFile,
         dataUrl: proj.originalDataUrl,
         name: proj.originalFileName || 'Saved Image',
-        size: proj.originalSizeBytes || 0,
+        size: proj.originalSizeBytes || restoredFile.size || 0,
         width: proj.originalWidth || 0,
         height: proj.originalHeight || 0,
         type: proj.originalMimeType || 'image/jpeg',
@@ -138,6 +171,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
             'splitter',
             `Split: ${initialImage.name}`
           );
+          proj.originalBlob = initialImage.file && initialImage.file.size > 0 ? initialImage.file : undefined;
           proj.originalDataUrl = initialImage.dataUrl;
           proj.originalFileName = initialImage.name;
           proj.originalSizeBytes = initialImage.size;
@@ -145,14 +179,13 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
           proj.originalHeight = initialImage.height;
           proj.originalMimeType = initialImage.type;
           proj.config = config;
-          proj.thumbnailUrl = initialImage.dataUrl;
           proj.status = 'draft';
 
           if (!isCancelled) {
             setCurrentProject(proj);
-            setImageState(initialImage);
+            replaceImageState(initialImage);
             setDownloadedTileIndices(new Set());
-            ProjectPersistenceService.saveProject(proj, true)
+            ProjectPersistenceService.saveProject(proj, false)
               .then((s) => {
                 if (!isCancelled) {
                   setCurrentProject(s);
@@ -186,7 +219,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     };
   }, [initialProjectId, userId]);
 
-  // When imageState changes, load the HTMLImageElement
+  // When imageState changes, load the HTMLImageElement fallback/reference
   useEffect(() => {
     if (imageState) {
       loadImageElement(imageState.dataUrl)
@@ -195,43 +228,70 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
         })
         .catch((err) => {
           console.error('Failed to load image element', err);
+          setProcessingError(formatProcessingError(err));
         });
     } else {
       setLoadedImgElement(null);
-      setTiles([]);
+      setTiles((prev) => {
+        revokeTileUrls(prev);
+        return [];
+      });
     }
   }, [imageState]);
 
-  // Re-run splitting when image or config changes
+  // Re-run splitting when image or config changes (runs in Web Worker off main thread when File/Blob present)
   useEffect(() => {
-    if (!loadedImgElement) return;
+    if (!imageState) return;
+    const hasBlob = imageState.file && imageState.file.size > 0;
+    const source = hasBlob ? imageState.file : loadedImgElement;
+    if (!source) return;
 
+    const controller = new AbortController();
     let isMounted = true;
     setIsProcessing(true);
+    setProcessingError(null);
+    setProcessingProgress({ percent: 5, stage: 'Preparing seamless split...' });
 
-    splitImage(loadedImgElement, config)
+    splitImage(source, config, {
+      signal: controller.signal,
+      onProgress: (p) => {
+        if (isMounted) setProcessingProgress(p);
+      },
+    })
       .then((result) => {
         if (isMounted) {
-          setTiles(result.tiles);
+          setTiles((prev) => {
+            revokeTileUrls(prev);
+            return result.tiles;
+          });
           setIsProcessing(false);
+          setProcessingProgress(null);
+        } else {
+          revokeTileUrls(result.tiles);
         }
       })
-      .catch((err) => {
+      .catch((err: any) => {
+        if (err?.name === 'AbortError') return;
         console.error('Split processing failed', err);
-        if (isMounted) setIsProcessing(false);
+        if (isMounted) {
+          setIsProcessing(false);
+          setProcessingProgress(null);
+          setProcessingError(formatProcessingError(err));
+        }
       });
 
     return () => {
       isMounted = false;
+      controller.abort();
     };
-  }, [loadedImgElement, config]);
+  }, [imageState, loadedImgElement, config]);
 
   // Reset carousel active slide when slide count changes
   useEffect(() => {
     setCarouselActiveSlide(0);
   }, [config.carouselSlideCount, config.mode]);
 
-  // Debounced auto-save when config, tiles, or project changes
+  // Debounced auto-save (100% local IndexedDB + metadata)
   useEffect(() => {
     if (!currentProject || !imageState) return;
 
@@ -258,8 +318,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
           originalHeight: imageState.height,
           originalSizeBytes: imageState.size,
           originalMimeType: imageState.type,
+          originalBlob: imageState.file && imageState.file.size > 0 ? imageState.file : currentProject.originalBlob,
           originalDataUrl: imageState.dataUrl,
-          thumbnailUrl: tiles[0]?.dataUrl || imageState.dataUrl,
           resultsData: {
             downloadedTileIndices: Array.from(downloadedTileIndices),
           },
@@ -284,6 +344,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
         ? { ...currentProject, title: `Split: ${newImg.name}` }
         : ProjectPersistenceService.createNewProject(userId, 'splitter', `Split: ${newImg.name}`);
 
+    proj.originalBlob = newImg.file && newImg.file.size > 0 ? newImg.file : undefined;
     proj.originalDataUrl = newImg.dataUrl;
     proj.originalFileName = newImg.name;
     proj.originalSizeBytes = newImg.size;
@@ -291,15 +352,15 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     proj.originalHeight = newImg.height;
     proj.originalMimeType = newImg.type;
     proj.config = config;
-    proj.thumbnailUrl = newImg.dataUrl;
     proj.status = 'draft';
 
+    setProcessingError(null);
     setCurrentProject(proj);
-    setImageState(newImg);
+    replaceImageState(newImg);
     setDownloadedTileIndices(new Set());
     setSaveStatus('saving');
 
-    ProjectPersistenceService.saveProject(proj, true)
+    ProjectPersistenceService.saveProject(proj, false)
       .then((saved) => {
         setCurrentProject(saved);
         setSaveStatus('saved');
@@ -337,11 +398,16 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
 
   const handleClearProject = async () => {
     await ProjectPersistenceService.setActiveProject(userId, 'splitter', null);
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setTiles([]);
+    setTiles((prev) => {
+      revokeTileUrls(prev);
+      return [];
+    });
     setCurrentProject(null);
     setDownloadedTileIndices(new Set());
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -366,11 +432,16 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
     await ProjectPersistenceService.setActiveProject(userId, 'splitter', null);
     setShowIndividualFilesModal(false);
     setSelectedTilePreview(null);
-    setImageState(null);
+    replaceImageState(null);
     setLoadedImgElement(null);
-    setTiles([]);
+    setTiles((prev) => {
+      revokeTileUrls(prev);
+      return [];
+    });
     setCurrentProject(null);
     setDownloadedTileIndices(new Set());
+    setProcessingError(null);
+    setProcessingProgress(null);
     setSaveStatus('idle');
   };
 
@@ -427,6 +498,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
   const handleDownloadAllZip = async () => {
     if (tiles.length === 0) return;
     setIsZipping(true);
+    setZipProgress(0);
+    setProcessingError(null);
     try {
       let postingGuide = 'PIXORA SPLIT ARCHIVE\n====================\n';
       if (config.mode === 'grid' && config.rows === 3 && config.cols === 3) {
@@ -445,15 +518,18 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
       const zipBlob = await createZipArchive(
         tiles,
         `${config.fileNamePrefix || 'pixora-tiles'}.zip`,
-        postingGuide
+        postingGuide,
+        (pct) => setZipProgress(pct)
       );
       triggerDownload(zipBlob, `${config.fileNamePrefix || 'pixora-tiles'}-all.zip`);
 
       await completeAndClearWorkspace();
     } catch (e) {
       console.error('ZIP generation failed', e);
+      setProcessingError(formatProcessingError(e));
     } finally {
       setIsZipping(false);
+      setZipProgress(null);
     }
   };
 
@@ -662,7 +738,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
             isProcessing={isProcessing}
             isZipping={isZipping}
             individualMeta={`${tiles.length} ${tiles.length === 1 ? 'file' : 'files'}`}
-            zipMeta=".zip"
+            zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
           />
 
           <button
@@ -749,10 +825,33 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
               )}
             </div>
 
+            {processingError && (
+              <div
+                role="alert"
+                className="mb-4 p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2.5 text-xs text-red-900"
+              >
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-600 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-bold block">Local Processing Notice</span>
+                  <span>{processingError}</span>
+                </div>
+              </div>
+            )}
+
             {isProcessing ? (
-              <div className="py-20 flex flex-col items-center justify-center text-[#171717]/60 gap-2">
+              <div className="py-20 flex flex-col items-center justify-center text-[#171717]/75 gap-3 px-4">
                 <span className="w-6 h-6 border-2 border-[#FF6B35] border-t-transparent rounded-full animate-spin" />
-                <span className="text-xs font-mono">Computing seamless pixel slices...</span>
+                <span className="text-xs font-mono">
+                  {processingProgress?.stage || 'Computing seamless pixel slices locally...'}
+                </span>
+                {processingProgress && (
+                  <div className="w-56 h-1.5 bg-[#171717]/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#FF6B35] transition-all duration-150"
+                      style={{ width: `${Math.min(100, Math.max(5, processingProgress.percent))}%` }}
+                    />
+                  </div>
+                )}
               </div>
             ) : previewView === 'assembled' ? (
               /* VIEW 1: ASSEMBLED FULL RECONSTRUCTION VIEW
@@ -866,6 +965,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                           <img
                             src={tile.dataUrl}
                             alt={tile.fileName}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-full block object-contain pointer-events-none"
                           />
                         </div>
@@ -922,6 +1023,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                           <img
                             src={tile.dataUrl}
                             alt={tile.fileName}
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-full block object-contain pointer-events-none"
                           />
                         </div>
@@ -972,6 +1075,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                             <img
                               src={tile.dataUrl}
                               alt={tile.fileName}
+                              loading="lazy"
+                              decoding="async"
                               className="w-full h-full block object-contain pointer-events-none"
                             />
                           </div>
@@ -1025,6 +1130,8 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                             <img
                               src={tile.dataUrl}
                               alt={tile.fileName}
+                              loading="lazy"
+                              decoding="async"
                               className="w-full h-full block object-contain pointer-events-none"
                             />
 
@@ -1564,7 +1671,7 @@ export const SplitterWorkspace: React.FC<SplitterWorkspaceProps> = ({
                 isProcessing={isProcessing}
                 isZipping={isZipping}
                 individualMeta={`${tiles.length} ${tiles.length === 1 ? 'file' : 'files'}`}
-                zipMeta=".zip"
+                zipMeta={isZipping && zipProgress !== null ? `${zipProgress}%` : '.zip'}
               />
             </div>
           </div>
